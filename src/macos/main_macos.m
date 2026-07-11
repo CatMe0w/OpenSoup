@@ -1,4 +1,4 @@
-// OpenSoup MVP: transparent always-on-top overlay with per-shape
+// OpenSoup MVP: transparent always-on-top overlay with per-pixel
 // click-through, rendering via sokol_gfx (Metal). No sokol_app: window
 // management is our own, since click-through overlays are the whole point.
 #import <Cocoa/Cocoa.h>
@@ -6,17 +6,22 @@
 #import <MetalKit/MetalKit.h>
 
 #include "scene.h"
+#include "demo.h"
 
 static NSWindow* window;
 static MTKView* view;
 static id<MTLDevice> mtl_device;
 static id view_delegate; // MTKView.delegate is weak, keep it alive here
+static const char* assets_root = "private/extracted"; // temporary, remove once we have a proper asset pipeline
+static CFTimeInterval last_frame_time;
 
-// mouse position in window coords -> NDC (both y-up, no flip needed)
-static void to_ndc(NSPoint p, float* nx, float* ny) {
+// window points (bottom-left origin) -> device pixels (top-left origin),
+// the scene's coordinate space
+static void to_px(NSPoint p, float* x, float* y) {
     const NSRect b = view.bounds;
-    *nx = 2.0f * (float)(p.x / b.size.width) - 1.0f;
-    *ny = 2.0f * (float)(p.y / b.size.height) - 1.0f;
+    const float scale = (float)window.backingScaleFactor;
+    *x = (float)p.x * scale;
+    *y = (float)(b.size.height - p.y) * scale;
 }
 
 @interface OverlayWindow : NSWindow
@@ -41,23 +46,18 @@ static void to_ndc(NSPoint p, float* nx, float* ny) {
     return YES;
 }
 - (void)mouseDown:(NSEvent*)event {
-    float nx, ny;
-    to_ndc([event locationInWindow], &nx, &ny);
-    if (scene_grab_begin(nx, ny)) {
-        NSLog(@"grab begin (%.3f, %.3f)", nx, ny);
-    }
+    float x, y;
+    to_px([event locationInWindow], &x, &y);
+    scene_grab_begin(x, y);
 }
 - (void)mouseDragged:(NSEvent*)event {
-    float nx, ny;
-    to_ndc([event locationInWindow], &nx, &ny);
-    scene_grab_move(nx, ny);
+    float x, y;
+    to_px([event locationInWindow], &x, &y);
+    scene_grab_move(x, y);
 }
 - (void)mouseUp:(NSEvent*)event {
     (void)event;
-    if (scene_grabbing()) {
-        scene_grab_end();
-        NSLog(@"grab end");
-    }
+    scene_grab_end();
 }
 - (void)keyDown:(NSEvent*)event {
     if (event.keyCode == 53) { // Esc
@@ -74,15 +74,19 @@ static void to_ndc(NSPoint p, float* nx, float* ny) {
 }
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
-        // per-pixel(-shape) click-through: poll the global cursor, hit-test
-        // the scene, and toggle ignoresMouseEvents. Never toggle mid-grab.
+        // per-pixel click-through: poll the global cursor, hit-test the
+        // scene, toggle ignoresMouseEvents. Never toggle mid-grab.
         if (!scene_grabbing()) {
             const NSPoint p = [NSEvent mouseLocation];
             const NSRect f = window.frame;
-            float nx, ny;
-            to_ndc(NSMakePoint(p.x - f.origin.x, p.y - f.origin.y), &nx, &ny);
-            window.ignoresMouseEvents = !scene_hit_test(nx, ny);
+            float x, y;
+            to_px(NSMakePoint(p.x - f.origin.x, p.y - f.origin.y), &x, &y);
+            window.ignoresMouseEvents = !scene_hit_test(x, y);
         }
+        const CFTimeInterval now = CACurrentMediaTime();
+        const double dt_ms = last_frame_time > 0 ? (now - last_frame_time) * 1000.0 : 16.7;
+        last_frame_time = now;
+
         const sg_swapchain swapchain = {
             .width = (int)v.drawableSize.width,
             .height = (int)v.drawableSize.height,
@@ -93,7 +97,7 @@ static void to_ndc(NSPoint p, float* nx, float* ny) {
                 .current_drawable = (__bridge const void*)v.currentDrawable,
             },
         };
-        scene_frame(&swapchain);
+        scene_frame(&swapchain, dt_ms);
     }
 }
 @end
@@ -142,8 +146,10 @@ static void to_ndc(NSPoint p, float* nx, float* ny) {
     };
     scene_setup(&env);
 
+    const int n = demo_load(assets_root);
+    NSLog(@"OpenSoup MVP up: %d sprites from %s; drag them, empty space clicks through, Esc quits", n, assets_root);
+
     [window orderFrontRegardless];
-    NSLog(@"OpenSoup MVP up: drag the triangle, empty space clicks through, Esc quits");
 }
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
@@ -151,7 +157,13 @@ static void to_ndc(NSPoint p, float* nx, float* ny) {
 }
 @end
 
-int main(void) {
+int main(int argc, char** argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0); // keep demo printfs visible when piped
+    for (int i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--assets") == 0) {
+            assets_root = argv[i + 1];
+        }
+    }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
