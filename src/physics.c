@@ -1,6 +1,9 @@
 #include "physics.h"
+#include <math.h>
+#include <stdlib.h>
 
 #define MAX_BODIES 64
+#define MAX_JOINTS 128
 #define SOLVER_ITERATIONS 4
 
 // TODO(material-combine): placeholder single material until the CMaterial
@@ -13,16 +16,25 @@ typedef struct {
     float mx, my;   // momentum
     float theta;    // orientation, radians CCW, accumulated
     float L;        // angular momentum
-    float radius;
+    phys_point* pts; // collision points, body-local
+    int npts;
     phys_params prm;
     bool grabbed;
     float tx, ty;   // mouse spring target while grabbed
 } body_t;
 
+typedef struct {
+    int b1, b2;
+    float a1x, a1y, a2x, a2y; // body-local anchors
+    float rest, k, c;
+} joint_t;
+
 static struct {
     float ww, wh; // wall extents
     body_t bodies[MAX_BODIES];
     int nbodies;
+    joint_t joints[MAX_JOINTS];
+    int njoints;
 } P;
 
 // classic RK4 stage time offsets, rk4_stage_coeffs @0x6D6BA0
@@ -33,7 +45,8 @@ void phys_set_world(float width, float height) {
     P.wh = height;
 }
 
-int phys_body_add(float x, float y, float radius, const phys_params* p) {
+int phys_body_add(float x, float y, float theta, const phys_params* p,
+                  const phys_point* pts, int npts, float fallback_radius) {
     if (P.nbodies >= MAX_BODIES) {
         return -1;
     }
@@ -42,96 +55,245 @@ int phys_body_add(float x, float y, float radius, const phys_params* p) {
     b->py = y;
     b->mx = 0;
     b->my = 0;
-    b->radius = radius;
+    b->theta = theta;
+    b->L = 0;
+    if (npts > 0) {
+        b->npts = npts;
+        b->pts = malloc((size_t)npts * sizeof(phys_point));
+        for (int i = 0; i < npts; i++) {
+            b->pts[i] = pts[i];
+        }
+    } else {
+        b->npts = 1;
+        b->pts = malloc(sizeof(phys_point));
+        b->pts[0] = (phys_point){ 0, 0, fallback_radius };
+    }
     b->prm = *p;
     b->grabbed = false;
     return P.nbodies++;
 }
 
-// impulse contact against one wall. n = inward wall normal, pen = penetration.
+int phys_joint_add(int body1, float a1x, float a1y,
+                   int body2, float a2x, float a2y,
+                   float rest_length, float stiffness, float dampener) {
+    if (P.njoints >= MAX_JOINTS || body1 < 0 || body2 < 0) {
+        return -1;
+    }
+    P.joints[P.njoints] = (joint_t){ body1, body2, a1x, a1y, a2x, a2y,
+                                     rest_length, stiffness, dampener };
+    return P.njoints++;
+}
+
+// impulse contact of one body-space point against one wall.
+// n = inward wall normal, pen = penetration of the point's circle.
 // Structure follows Contact_prepare/solveIter: resolve only when approaching,
-// restitution on the normal, velocity-dependent friction on the tangent.
-static void solve_wall(body_t* b, float nx, float ny, float pen) {
+// restitution on the normal, velocity-dependent friction on the tangent;
+// the contact-point offset couples the impulses into angular momentum.
+static void solve_wall_pt(body_t* b, float wx, float wy, float pr,
+                          float nx, float ny, float pen) {
     if (pen <= 0) {
         return;
     }
     const float m = b->prm.mass;
-    const float vx = b->mx / m;
-    const float vy = b->my / m;
+    const float inv_i = (!b->prm.fixed_rotate && b->prm.inertia > 0)
+                            ? 1.0f / b->prm.inertia : 0.0f;
+    // contact point = the point circle's surface toward the wall
+    const float rx = wx - nx * pr - b->px;
+    const float ry = wy - ny * pr - b->py;
+    const float omega = b->L * inv_i;
+    // velocity at the contact point: v + omega x r
+    const float vx = b->mx / m - omega * ry;
+    const float vy = b->my / m + omega * rx;
     const float vn = vx * nx + vy * ny;
     const float tx = -ny, ty = nx;
     if (vn < 0) { // approaching: normal impulse with restitution
-        const float j = -(1.0f + MAT_RESTITUTION) * vn * m;
+        const float rn = rx * ny - ry * nx; // r x n
+        const float j = -(1.0f + MAT_RESTITUTION) * vn / (1.0f / m + rn * rn * inv_i);
         b->mx += j * nx;
         b->my += j * ny;
+        b->L += (rx * ny - ry * nx) * j;
     }
-    // friction opposes the CONTACT POINT's tangential velocity (includes the
+    // friction opposes the contact point's tangential velocity (includes the
     // rotational term): rolling couples spin<->translation, spin decays on
     // ground contact instead of persisting forever
-    const float omega = (b->prm.inertia > 0) ? b->L / b->prm.inertia : 0;
-    const float vt_cp = (vx * tx + vy * ty) - omega * b->radius;
-    const float jt = -MAT_FRICTION * vt_cp * m;
+    const float vt = vx * tx + vy * ty;
+    const float rt = rx * ty - ry * tx; // r x t
+    const float jt = -MAT_FRICTION * vt / (1.0f / m + rt * rt * inv_i);
     b->mx += jt * tx;
     b->my += jt * ty;
-    if (!b->prm.fixed_rotate) {
-        b->L += -b->radius * jt;
-    }
+    b->L += rt * jt;
     // positional correction (stand-in for the stiffness/penetration term)
     b->px += nx * pen;
     b->py += ny * pen;
 }
 
-static void step_once(void) {
+static void solve_walls(body_t* b) {
+    for (int i = 0; i < b->npts; i++) {
+        const float c = cosf(b->theta), s = sinf(b->theta);
+        const phys_point* p = &b->pts[i];
+        const float wx = b->px + c * p->x - s * p->y;
+        const float wy = b->py + s * p->x + c * p->y;
+        solve_wall_pt(b, wx, wy, p->r, 1, 0, p->r - wx);         // left
+        solve_wall_pt(b, wx, wy, p->r, -1, 0, wx + p->r - P.ww); // right
+        solve_wall_pt(b, wx, wy, p->r, 0, 1, p->r - wy);         // floor
+        solve_wall_pt(b, wx, wy, p->r, 0, -1, wy + p->r - P.wh); // ceiling
+    }
+}
+
+// RK4 over the full coupled system (positions AND momenta, spring forces
+// re-evaluated at every stage). This is what the original's stepOnce does -
+// with joint stiffness up to 6000 at dt=0.01 the rotational spring modes sit
+// beyond explicit Euler's stability limit but inside RK4's (omega*dt < 2.83).
+typedef struct {
+    float px, py, theta;
+    float mx, my, L;
+} bstate_t;
+
+static bstate_t rk_y[MAX_BODIES];   // stage state
+static bstate_t rk_k[4][MAX_BODIES]; // stage derivatives
+
+// world position and velocity of a body-local anchor at a stage state
+static void anchor_state(const bstate_t* s, const body_t* b, float ax, float ay,
+                         float* px, float* py, float* vx, float* vy) {
+    const float c = cosf(s->theta), sn = sinf(s->theta);
+    const float rx = c * ax - sn * ay;
+    const float ry = sn * ax + c * ay;
+    *px = s->px + rx;
+    *py = s->py + ry;
+    const float omega = (!b->prm.fixed_rotate && b->prm.inertia > 0)
+                            ? s->L / b->prm.inertia : 0.0f;
+    *vx = s->mx / b->prm.mass - omega * ry;
+    *vy = s->my / b->prm.mass + omega * rx;
+}
+
+// accumulate force at a body-local anchor into a derivative
+static void force_at(bstate_t* d, const bstate_t* s, const body_t* b,
+                     float ax, float ay, float fx, float fy) {
+    if (b->prm.anchored) {
+        return;
+    }
+    d->mx += fx;
+    d->my += fy;
+    if (!b->prm.fixed_rotate) {
+        const float c = cosf(s->theta), sn = sinf(s->theta);
+        const float rx = c * ax - sn * ay;
+        const float ry = sn * ax + c * ay;
+        d->L += rx * fy - ry * fx;
+    }
+}
+
+// derivative of the whole system at stage state rk_y -> out
+static void derive(bstate_t* out) {
     for (int i = 0; i < P.nbodies; i++) {
-        body_t* b = &P.bodies[i];
-        if (b->prm.anchored) { // fixedMove: no linear motion (original +201 flag)
+        const body_t* b = &P.bodies[i];
+        const bstate_t* s = &rk_y[i];
+        bstate_t* d = &out[i];
+        *d = (bstate_t){ 0 };
+        if (b->prm.anchored) { // fixedMove: no motion at all (original +201 flag)
             continue;
         }
-        // gravity as momentum impulse: dp = m * g * dt (Body_applyGravity);
-        // per-body g honours gravityOverride (balloons have POSITIVE g)
-        b->my += b->prm.mass * b->prm.gravity * PHYS_DT;
+        d->px = s->mx / b->prm.mass;
+        d->py = s->my / b->prm.mass;
+        if (!b->prm.fixed_rotate && b->prm.inertia > 0) {
+            d->theta = s->L / b->prm.inertia;
+        }
+
+        // gravity (Body_applyGravity); per-body g honours gravityOverride
+        // (balloons have POSITIVE g)
+        d->my += b->prm.mass * b->prm.gravity;
 
         // air resistance: F = -c_lin * v, tau = -c_ang * omega
-        b->mx -= b->prm.air_linear * (b->mx / b->prm.mass) * PHYS_DT;
-        b->my -= b->prm.air_linear * (b->my / b->prm.mass) * PHYS_DT;
+        d->mx -= b->prm.air_linear * (s->mx / b->prm.mass);
+        d->my -= b->prm.air_linear * (s->my / b->prm.mass);
         if (b->prm.inertia > 0) {
-            b->L -= b->prm.air_angular * (b->L / b->prm.inertia) * PHYS_DT;
+            d->L -= b->prm.air_angular * (s->L / b->prm.inertia);
+        }
+
+        // motors: constant body-local force + torque
+        // TODO(verify): whether linearMotor force rotates with the limb
+        if (b->prm.motor_force[0] != 0 || b->prm.motor_force[1] != 0) {
+            const float c = cosf(s->theta), sn = sinf(s->theta);
+            d->mx += c * b->prm.motor_force[0] - sn * b->prm.motor_force[1];
+            d->my += sn * b->prm.motor_force[0] + c * b->prm.motor_force[1];
+        }
+        if (!b->prm.fixed_rotate) {
+            d->L += b->prm.motor_torque;
         }
 
         if (b->grabbed) { // mouse spring (sub_532800 form)
-            const float fx = b->prm.mouse_stiffness * (b->tx - b->px)
-                           - b->prm.mouse_dampener * (b->mx / b->prm.mass);
-            const float fy = b->prm.mouse_stiffness * (b->ty - b->py)
-                           - b->prm.mouse_dampener * (b->my / b->prm.mass);
-            b->mx += fx * PHYS_DT;
-            b->my += fy * PHYS_DT;
+            d->mx += b->prm.mouse_stiffness * (b->tx - s->px)
+                   - b->prm.mouse_dampener * (s->mx / b->prm.mass);
+            d->my += b->prm.mouse_stiffness * (b->ty - s->py)
+                   - b->prm.mouse_dampener * (s->my / b->prm.mass);
         }
+    }
 
-        // RK4 position integration. With no position-dependent forces yet the
-        // stages collapse to p += v*dt, but keep the structure of stepOnce.
-        const float vx = b->mx / b->prm.mass;
-        const float vy = b->my / b->prm.mass;
-        float x = b->px, y = b->py;
-        float acc_x = 0, acc_y = 0;
-        for (int s = 0; s < 4; s++) {
-            const float w = (s == 0 || s == 3) ? 1.0f / 6.0f : 1.0f / 3.0f;
-            (void)rk4_coeffs[s];
-            acc_x += w * vx;
-            acc_y += w * vy;
+    // spring joints, same constraint form as the mouse spring (sub_532800):
+    // F = k * stretch * dir - c * relative anchor velocity, applied at the
+    // anchors (torque from the offset)
+    for (int i = 0; i < P.njoints; i++) {
+        const joint_t* j = &P.joints[i];
+        const body_t* b1 = &P.bodies[j->b1];
+        const body_t* b2 = &P.bodies[j->b2];
+        float p1x, p1y, v1x, v1y, p2x, p2y, v2x, v2y;
+        anchor_state(&rk_y[j->b1], b1, j->a1x, j->a1y, &p1x, &p1y, &v1x, &v1y);
+        anchor_state(&rk_y[j->b2], b2, j->a2x, j->a2y, &p2x, &p2y, &v2x, &v2y);
+        float dx = p2x - p1x, dy = p2y - p1y;
+        if (j->rest != 0.0f) {
+            const float dist = sqrtf(dx * dx + dy * dy);
+            if (dist > 1e-6f) {
+                const float scale = (dist - j->rest) / dist;
+                dx *= scale;
+                dy *= scale;
+            }
         }
-        b->px = x + acc_x * PHYS_DT;
-        b->py = y + acc_y * PHYS_DT;
+        const float fx = j->k * dx - j->c * (v1x - v2x);
+        const float fy = j->k * dy - j->c * (v1y - v2y);
+        force_at(&out[j->b1], &rk_y[j->b1], b1, j->a1x, j->a1y, fx, fy);
+        force_at(&out[j->b2], &rk_y[j->b2], b2, j->a2x, j->a2y, -fx, -fy);
+    }
+}
 
-        // angular: theta += omega*dt, omega = L / inertia (momentum space)
-        if (!b->prm.fixed_rotate && b->prm.inertia > 0) {
-            b->theta += (b->L / b->prm.inertia) * PHYS_DT;
+static void step_once(void) {
+    // classic RK4: k1=f(y), k2=f(y+dt/2*k1), k3=f(y+dt/2*k2), k4=f(y+dt*k3)
+    for (int stage = 0; stage < 4; stage++) {
+        for (int i = 0; i < P.nbodies; i++) {
+            const body_t* b = &P.bodies[i];
+            bstate_t y = { b->px, b->py, b->theta, b->mx, b->my, b->L };
+            if (stage > 0) {
+                const float h = rk4_coeffs[stage] * PHYS_DT;
+                const bstate_t* k = &rk_k[stage - 1][i];
+                y.px += h * k->px;
+                y.py += h * k->py;
+                y.theta += h * k->theta;
+                y.mx += h * k->mx;
+                y.my += h * k->my;
+                y.L += h * k->L;
+            }
+            rk_y[i] = y;
         }
+        derive(rk_k[stage]);
+    }
+    for (int i = 0; i < P.nbodies; i++) {
+        body_t* b = &P.bodies[i];
+        if (b->prm.anchored) {
+            continue;
+        }
+        const bstate_t* k1 = &rk_k[0][i];
+        const bstate_t* k2 = &rk_k[1][i];
+        const bstate_t* k3 = &rk_k[2][i];
+        const bstate_t* k4 = &rk_k[3][i];
+        const float h = PHYS_DT / 6.0f;
+        b->px += h * (k1->px + 2 * k2->px + 2 * k3->px + k4->px);
+        b->py += h * (k1->py + 2 * k2->py + 2 * k3->py + k4->py);
+        b->theta += h * (k1->theta + 2 * k2->theta + 2 * k3->theta + k4->theta);
+        b->mx += h * (k1->mx + 2 * k2->mx + 2 * k3->mx + k4->mx);
+        b->my += h * (k1->my + 2 * k2->my + 2 * k3->my + k4->my);
+        b->L += h * (k1->L + 2 * k2->L + 2 * k3->L + k4->L);
 
+        // contacts stay impulse-based on the integrated state
         for (int it = 0; it < SOLVER_ITERATIONS; it++) {
-            solve_wall(b, 1, 0, b->radius - b->px);            // left
-            solve_wall(b, -1, 0, b->px + b->radius - P.ww);    // right
-            solve_wall(b, 0, 1, b->radius - b->py);            // floor
-            solve_wall(b, 0, -1, b->py + b->radius - P.wh);    // ceiling
+            solve_walls(b);
         }
     }
 }

@@ -15,12 +15,19 @@ void scene_shutdown(void);
 // Register a sprite. frames are premultiplied RGBA8 (top-left origin); the
 // scene keeps the pointers borrowed for alpha hit-testing - caller must keep
 // them alive. speed_ms only matters when nframes > 1.
+// group: sprites of one toy share a group; grabbing any of them raises the
+// whole group (draw order within the group = insertion order, i.e. zOrder
+// if the caller adds sprites back-to-front).
 int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
-                     int speed_ms, float x_px, float y_px);
+                     int speed_ms, float x_px, float y_px, int group);
 
-// Attach a sprite to a physics body (sprite centre follows the body).
+// Attach a sprite to a physics body. (anchor_x, anchor_y) is the vector
+// from the body origin to the sprite's visual centre (objectCentreOfMass
+// from the toy definition), pixels, y-up. The FLC rotation frames are
+// pre-rendered about the canvas centre, and the centre is a material point
+// of the limb, so the offset rotates with the body's orientation.
 // Grabbing a bound sprite drives the body; releasing throws it.
-void scene_sprite_bind_body(int sprite, int body);
+void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y);
 
 // true if the point hits a non-transparent sprite pixel (drives click-through)
 bool scene_hit_test(float x_px, float y_px);

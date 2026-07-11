@@ -1,6 +1,7 @@
 #include "scene.h"
 #include "physics.h"
 #include "sokol_log.h"
+#include <math.h>
 
 #define MAX_SPRITES 64
 #define MAX_FRAMES 256
@@ -15,6 +16,8 @@ typedef struct {
     sg_view views[MAX_FRAMES];
     uint8_t* const* pixels; // borrowed premultiplied RGBA, for alpha hit-test
     int body;               // physics body index or -1
+    float ax, ay;           // body origin in canvas px relative to centre, y-down
+    int group;              // toy group; grabbed together, raised together
 } sprite_t;
 
 typedef struct {
@@ -39,11 +42,19 @@ static struct {
 } state;
 
 // world (meters, y-up, origin bottom-left) <-> view (device px, y-down)
+// FLC frames rotate about the CANVAS CENTRE (verified: rotated frames' art
+// bboxes stay symmetric about it); objectCentreOfMass is the vector from the
+// body origin to that visual centre, a material point of the limb - so the
+// offset ROTATES with the body's orientation.
 static void body_to_sprite(sprite_t* s) {
     float wx, wy;
     phys_body_pos(s->body, &wx, &wy);
-    s->x = wx * PHYS_PX_PER_UNIT - (float)s->w / 2.0f;
-    s->y = state.view_h - wy * PHYS_PX_PER_UNIT - (float)s->h / 2.0f;
+    const float th = phys_body_orientation(s->body);
+    const float c = cosf(th), sn = sinf(th);
+    const float ox = c * s->ax - sn * s->ay; // px, y-up world sense
+    const float oy = sn * s->ax + c * s->ay;
+    s->x = wx * PHYS_PX_PER_UNIT + ox - (float)s->w / 2.0f;
+    s->y = state.view_h - wy * PHYS_PX_PER_UNIT - oy - (float)s->h / 2.0f;
 }
 
 void scene_setup(const sg_environment* env) {
@@ -130,7 +141,7 @@ void scene_setup(const sg_environment* env) {
 }
 
 int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
-                     int speed_ms, float x_px, float y_px) {
+                     int speed_ms, float x_px, float y_px, int group) {
     if (state.nsprites >= MAX_SPRITES || nframes < 1 || nframes > MAX_FRAMES) {
         return -1;
     }
@@ -145,6 +156,9 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->acc_ms = 0;
     s->pixels = frames;
     s->body = -1;
+    s->ax = 0;
+    s->ay = 0;
+    s->group = group;
     for (int f = 0; f < nframes; f++) {
         s->views[f] = sg_make_view(&(sg_view_desc){
             .texture.image = sg_make_image(&(sg_image_desc){
@@ -158,8 +172,10 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     return state.nsprites++;
 }
 
-void scene_sprite_bind_body(int sprite, int body) {
+void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y) {
     state.sprites[sprite].body = body;
+    state.sprites[sprite].ax = anchor_x;
+    state.sprites[sprite].ay = anchor_y;
 }
 
 void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
@@ -185,8 +201,11 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
             if (s->nframes > 1) {
                 // FLC frames are pre-rendered ROTATION phases (GDI can't rotate
                 // bitmaps): frame = f(orientation), not a timed animation.
-                // TODO(verify): frame direction/phase vs the original renderer
-                const float turns = -phys_body_orientation(s->body) / (2.0f * 3.14159265f);
+                //
+                // alpha principal-axis moments: frames step 2pi/N per index in
+                // the visually-CCW direction, frame 0 = theta 0 - same sign
+                // as the physics angle.
+                const float turns = phys_body_orientation(s->body) / (2.0f * 3.14159265f);
                 const float wrapped = turns - (float)(int)turns; // frac, sign kept
                 int f = (int)((wrapped < 0 ? wrapped + 1.0f : wrapped) * (float)s->nframes);
                 s->frame = (f >= s->nframes) ? 0 : f;
@@ -253,17 +272,41 @@ bool scene_grab_begin(float x, float y) {
     if (i < 0) {
         return false;
     }
-    // bring to front so it draws above and hit-tests first
-    sprite_t tmp = state.sprites[i];
-    for (int k = i; k < state.nsprites - 1; k++) {
-        state.sprites[k] = state.sprites[k + 1];
+    // raise the whole toy group to the front (stable: intra-group zOrder
+    // stays); the hit sprite becomes the grabbed one at its new index
+    const int group = state.sprites[i].group;
+    const int hit_body = state.sprites[i].body;
+    const float hit_x = state.sprites[i].x, hit_y = state.sprites[i].y;
+    sprite_t reordered[MAX_SPRITES];
+    int n = 0, grabbed = -1;
+    for (int k = 0; k < state.nsprites; k++) {
+        if (state.sprites[k].group != group) {
+            reordered[n++] = state.sprites[k];
+        }
     }
-    state.sprites[state.nsprites - 1] = tmp;
-    state.grabbed = state.nsprites - 1;
-    state.grab_off[0] = x - tmp.x;
-    state.grab_off[1] = y - tmp.y;
-    if (tmp.body >= 0) {
-        phys_grab(tmp.body);
+    for (int k = 0; k < state.nsprites; k++) {
+        if (state.sprites[k].group == group) {
+            if (k == i) {
+                grabbed = n;
+            }
+            reordered[n++] = state.sprites[k];
+        }
+    }
+    for (int k = 0; k < n; k++) {
+        state.sprites[k] = reordered[k];
+    }
+    state.grabbed = grabbed;
+    if (hit_body >= 0) {
+        // offset from the BODY's screen position, so the spring target
+        // preserves where on the toy the user grabbed
+        float wx, wy;
+        phys_body_pos(hit_body, &wx, &wy);
+        state.grab_off[0] = x - wx * PHYS_PX_PER_UNIT;
+        state.grab_off[1] = y - (state.view_h - wy * PHYS_PX_PER_UNIT);
+        phys_grab(hit_body);
+    } else {
+        state.grab_off[0] = x - hit_x;
+        state.grab_off[1] = y - hit_y;
     }
     return true;
 }
@@ -274,12 +317,12 @@ void scene_grab_move(float x, float y) {
     }
     sprite_t* s = &state.sprites[state.grabbed];
     if (s->body >= 0) {
-        // cursor -> desired sprite centre -> world = the spring target;
+        // cursor -> desired body screen pos -> world = the spring target;
         // the body (and thus the sprite) follows via the mouse spring
-        const float cx = x - state.grab_off[0] + (float)s->w / 2.0f;
-        const float cy = y - state.grab_off[1] + (float)s->h / 2.0f;
-        phys_grab_move(s->body, cx / PHYS_PX_PER_UNIT,
-                       (state.view_h - cy) / PHYS_PX_PER_UNIT);
+        const float bx = x - state.grab_off[0];
+        const float by = y - state.grab_off[1];
+        phys_grab_move(s->body, bx / PHYS_PX_PER_UNIT,
+                       (state.view_h - by) / PHYS_PX_PER_UNIT);
     } else {
         s->x = x - state.grab_off[0];
         s->y = y - state.grab_off[1];

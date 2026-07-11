@@ -1,6 +1,7 @@
-// Milestone demo: real Souptoys art + real toy-definition physics params.
-// Hardcoded asset picks; replaced by full toy assembly once the defs tail
-// (shapes/sprites) is decoded.
+// Milestone demo: whole toys assembled from their real definitions
+// multi-limb bodies, polygon/circle collision shapes, spring joints,
+// per-limb sprites with real anchors and zOrder. Toy picks are still
+// hardcoded; the toybox menu UI comes later.
 #include "demo.h"
 #include "assets.h"
 #include "physics.h"
@@ -10,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MAX_LIMBS 64
+#define MAX_SHAPE_PTS 160
+
 static char* join(const char* root, const char* rel) {
     const size_t n = strlen(root) + strlen(rel) + 2;
     char* p = malloc(n);
@@ -17,64 +21,130 @@ static char* join(const char* root, const char* rel) {
     return p;
 }
 
-// circle body from the toy's real definition; radius still sprite-derived
-// until shape polygons are decoded
-static void make_body(int sprite, const char* class_name, int w, int h,
-                      float x_px, float drop_order) {
-    const float r = ((float)(w < h ? w : h) / 2.0f) / PHYS_PX_PER_UNIT;
-    phys_params p = {
-        .mass = 3.14159f * r * r * 4.0f,
-        .inertia = 3.14159f * r * r * 4.0f * r * r / 2.0f,
-        .gravity = PHYS_GRAVITY,
-        .mouse_stiffness = PHYS_MOUSE_STIFFNESS,
-        .mouse_dampener = PHYS_MOUSE_DAMPENER,
-        .air_linear = 0.1f,
-        .air_angular = 0.1f,
-        .anchored = false,
-        .fixed_rotate = false,
-    };
-    const toydef_t* d = toydefs_find(class_name);
-    if (d) {
-        p.mass = d->mass;
-        p.inertia = d->inertia_tensor;
-        p.gravity = d->has_gravity_override ? d->gravity_override : PHYS_GRAVITY;
-        p.mouse_stiffness = d->mouse_stiffness;
-        p.mouse_dampener = d->mouse_dampener;
-        p.air_linear = d->air_resistance_linear;
-        p.air_angular = d->air_resistance_angular;
-        p.anchored = d->fixed_move;
-        p.fixed_rotate = d->fixed_rotate;
-        printf("demo: %s def: mass=%.3g g=%.3g mouseK=%.3g mouseC=%.3g anchored=%d\n",
-               class_name, p.mass, p.gravity, p.mouse_stiffness, p.mouse_dampener,
-               p.anchored);
-    } else {
-        fprintf(stderr, "demo: no def for %s, using fallbacks\n", class_name);
+// Souptoys ships transparency as "<name>_Alpha.flc" next to the color FLC
+static char* alpha_variant(const char* color_path) {
+    const char* dot = strrchr(color_path, '.');
+    if (!dot) {
+        return NULL;
     }
-    const float y0 = p.anchored ? 4.0f : 6.0f + drop_order * 1.5f;
-    const int body = phys_body_add(x_px / PHYS_PX_PER_UNIT, y0, r, &p);
-    scene_sprite_bind_body(sprite, body);
+    const size_t base = (size_t)(dot - color_path);
+    char* p = malloc(base + sizeof("_Alpha") + strlen(dot));
+    memcpy(p, color_path, base);
+    strcpy(p + base, "_Alpha");
+    strcat(p, dot);
+    FILE* f = fopen(p, "rb");
+    if (!f) {
+        free(p);
+        return NULL;
+    }
+    fclose(f);
+    return p;
 }
 
-static bool add_flc(const char* root, const char* class_name,
-                    const char* rel_color, const char* rel_alpha,
-                    float x, float drop_order) {
-    char* cpath = join(root, rel_color);
-    char* apath = rel_alpha ? join(root, rel_alpha) : NULL;
-    // leaked on purpose: scene borrows the pixel buffers for hit-testing
-    as_anim* anim = calloc(1, sizeof(as_anim));
-    const bool ok = as_load_flc(cpath, apath, anim);
-    if (ok) {
-        const int sprite = scene_sprite_add(anim->w, anim->h, anim->frame_count,
-                                            anim->frames, anim->speed_ms, x, 100);
-        make_body(sprite, class_name, anim->w, anim->h, x, drop_order);
-        printf("demo: %s (%dx%d, %d frames @ %dms)\n", rel_color, anim->w,
-               anim->h, anim->frame_count, anim->speed_ms);
-    } else {
-        fprintf(stderr, "demo: FAILED %s\n", cpath);
+// One physics body per limb: collision points from the def's colliding
+// shapes, everything scaled from toy-local units into world meters.
+static int make_limb_body(const td_limb* l, float wx, float wy, float scale) {
+    phys_point pts[MAX_SHAPE_PTS];
+    int npts = 0;
+    for (int s = 0; s < l->nshapes; s++) {
+        const td_shape* sh = &l->shapes[s];
+        if (!sh->collides) {
+            continue; // grab-only shapes don't collide
+        }
+        for (int p = 0; p < sh->npoints && npts < MAX_SHAPE_PTS; p++) {
+            pts[npts++] = (phys_point){ sh->points[p].x * scale,
+                                        sh->points[p].y * scale,
+                                        sh->points[p].r * scale };
+        }
     }
-    free(cpath);
-    free(apath);
-    return ok;
+    const phys_params prm = {
+        .mass = l->mass,
+        .inertia = l->inertia * scale * scale, // def inertia is toy-local units^2
+        .gravity = l->has_gravity_override ? l->gravity_override : PHYS_GRAVITY,
+        .mouse_stiffness = l->mouse_stiffness,
+        .mouse_dampener = l->mouse_dampener,
+        .air_linear = l->air_resistance_linear,
+        .air_angular = l->air_resistance_angular,
+        .anchored = l->fixed_move,
+        .fixed_rotate = l->fixed_rotate,
+        .motor_force = { l->motor_force[0], l->motor_force[1] },
+        .motor_torque = l->motor_torque,
+    };
+    return phys_body_add(wx + l->rest_pos[0] * scale, wy + l->rest_pos[1] * scale,
+                         l->rest_orient, &prm, pts, npts, 0.25f);
+}
+
+// Assemble one toy instance at (x_px, y_world): bodies for every limb,
+// spring joints between them, sprites added back-to-front by zOrder.
+static bool spawn_toy(const char* assets_root, const char* class_name,
+                      float x_px, float y_world, int group) {
+    const toydef_t* d = toydefs_find(class_name);
+    if (!d || d->nlimbs > MAX_LIMBS) {
+        fprintf(stderr, "demo: no def for %s\n", class_name);
+        return false;
+    }
+    const float S = d->base_scale;
+    const float wx = x_px / PHYS_PX_PER_UNIT;
+
+    int bodies[MAX_LIMBS];
+    for (int i = 0; i < d->nlimbs; i++) {
+        bodies[i] = make_limb_body(&d->limbs[i], wx, y_world, S);
+    }
+
+    for (int i = 0; i < d->njoints; i++) {
+        const td_joint* j = &d->joints[i];
+        if (j->limb1 < 0 || j->limb2 < 0) {
+            continue;
+        }
+        phys_joint_add(bodies[j->limb1], j->anchor1[0] * S, j->anchor1[1] * S,
+                       bodies[j->limb2], j->anchor2[0] * S, j->anchor2[1] * S,
+                       j->rest_length * S, j->stiffness, j->dampener);
+    }
+
+    // draw order: limbs sorted by their sprite's zOrder, DESCENDING =
+    // back-to-front - smaller zOrder is nearer the viewer (bear: legs -70
+    // deepest, then arms -75, body -100, head -110 in front)
+    int order[MAX_LIMBS];
+    int nvis = 0;
+    for (int i = 0; i < d->nlimbs; i++) {
+        if (d->limbs[i].nsprites > 0 && d->limbs[i].sprites[0].image) {
+            order[nvis++] = i;
+        }
+    }
+    for (int a = 1; a < nvis; a++) {
+        const int v = order[a];
+        int b = a;
+        while (b > 0 && d->limbs[order[b - 1]].sprites[0].z_order
+                            < d->limbs[v].sprites[0].z_order) {
+            order[b] = order[b - 1];
+            b--;
+        }
+        order[b] = v;
+    }
+
+    int shown = 0;
+    for (int k = 0; k < nvis; k++) {
+        const td_limb* l = &d->limbs[order[k]];
+        const td_sprite* sp = &l->sprites[0]; // TODO: multi-sprite limbs
+        char* cpath = join(assets_root, sp->image);
+        char* apath = alpha_variant(cpath);
+        // leaked on purpose: scene borrows the pixel buffers for hit-testing
+        as_anim* anim = calloc(1, sizeof(as_anim));
+        if (as_load_flc(cpath, apath, anim)) {
+            const int sprite = scene_sprite_add(anim->w, anim->h, anim->frame_count,
+                                                anim->frames, anim->speed_ms,
+                                                0, 0, group);
+            scene_sprite_bind_body(sprite, bodies[order[k]], sp->com[0], sp->com[1]);
+            shown++;
+        } else {
+            fprintf(stderr, "demo: FAILED %s\n", cpath);
+        }
+        free(cpath);
+        free(apath);
+    }
+    printf("demo: %s: %d limbs (%d sprites), %d joints, scale %.3g\n",
+           class_name, d->nlimbs, shown, d->njoints, S);
+    return shown > 0;
 }
 
 int demo_load(const char* assets_root) {
@@ -82,26 +152,20 @@ int demo_load(const char* assets_root) {
     if (toydefs_load(defs)) {
         printf("demo: %d toy defs loaded\n", toydefs_count());
     } else {
-        fprintf(stderr, "demo: toydefs.json missing at %s - fallback params\n", defs);
+        fprintf(stderr, "demo: toydefs.json missing at %s\n", defs);
+        free(defs);
+        return 0;
     }
     free(defs);
 
     int n = 0;
     // fixed scenery: anchored, gravity 0
-    n += add_flc(assets_root, "PirateWind",
-                 "toys_toybox_toy/graphics/U5 Pirate Wheel/wheel.flc",
-                 "toys_toybox_toy/graphics/U5 Pirate Wheel/wheel_Alpha.flc", 300, 0);
+    n += spawn_toy(assets_root, "PirateWind", 300, 4.0f, n);
     // bouncy ball: mass 1.5, default mouse spring
-    n += add_flc(assets_root, "U1Bouncy",
-                 "toys_data_toy/Graphics/U1 Bouncy/bouncy.flc",
-                 "toys_data_toy/Graphics/U1 Bouncy/bouncy_Alpha.flc", 600, 1);
-    // balloon: POSITIVE gravity override, floats up
-    n += add_flc(assets_root, "BalloonBlue",
-                 "toys_data_toy/Graphics/Small Balloon/Blue/Balloon.flc",
-                 "toys_data_toy/Graphics/Small Balloon/Blue/Balloon_Alpha.flc", 900, 2);
-    // bear body: stiff mouse spring override (k=1000, c=30) - snappy grab
-    n += add_flc(assets_root, "U6Bluebear",
-                 "toys_toybox_toy/graphics/U6 Bluebear/Body/Body.flc",
-                 "toys_toybox_toy/graphics/U6 Bluebear/Body/Body_Alpha.flc", 1200, 3);
+    n += spawn_toy(assets_root, "U1Bouncy", 600, 6.0f, n);
+    // balloon: 7 limbs (balloon + string chain), POSITIVE gravity override
+    n += spawn_toy(assets_root, "BalloonBlue", 900, 5.0f, n);
+    // the bear: 6 limbs, 11 spring joints, the full-assembly milestone
+    n += spawn_toy(assets_root, "U6Bluebear", 1200, 5.0f, n);
     return n;
 }
