@@ -19,6 +19,10 @@ typedef struct {
 typedef struct {
     bool collides; // memberOf non-empty: participates in collision
     bool grab;     // mouse-interaction shape
+    // per-wall permission bits (PHYS_WALL_*) from the memberOf groups
+    // <wall>_repel (linear impulse) / <wall>_rotate (angular impulse)
+    unsigned char wall_repel;
+    unsigned char wall_rotate;
     int npoints;
     td_point* points; // toy-local units
 } td_shape;
@@ -26,8 +30,8 @@ typedef struct {
 typedef struct {
     char* image; // resolved color-FLC path relative to the assets root
     int num_frames;
-    float com[2]; // objectCentreOfMass, sprite px y-down from canvas centre
-    int z_order;  // ascending = back-to-front
+    float com[2]; // objectCentreOfMass: body origin -> visual centre, px, y-up
+    int z_order;  // smaller = nearer the viewer; draw descending
 } td_sprite;
 
 typedef struct {

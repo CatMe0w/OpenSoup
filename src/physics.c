@@ -4,12 +4,12 @@
 
 #define MAX_BODIES 64
 #define MAX_JOINTS 128
-#define SOLVER_ITERATIONS 4
+#define FRICTION_ITERATIONS 4 // original: 4x Contact_solveIter per pair
 
-// TODO(material-combine): placeholder single material until the CMaterial
-// combine rule at manifold creation is reversed (Toybox_physics.md remaining)
-#define MAT_RESTITUTION 0.35f
-#define MAT_FRICTION 0.15f
+// world walls are the hidden "World" toy's 4 anchored limbs
+// (souptoys_core.toy def): mass=1.0, so the contact mass ratio
+// massWall/massBody is simply 1/massBody.
+#define WALL_MASS 1.0f
 
 typedef struct {
     float px, py;   // position, meters
@@ -66,7 +66,7 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
     } else {
         b->npts = 1;
         b->pts = malloc(sizeof(phys_point));
-        b->pts[0] = (phys_point){ 0, 0, fallback_radius };
+        b->pts[0] = (phys_point){ 0, 0, fallback_radius, 0xF, 0xF };
     }
     b->prm = *p;
     b->grabbed = false;
@@ -84,71 +84,151 @@ int phys_joint_add(int body1, float a1x, float a1y,
     return P.njoints++;
 }
 
-// impulse contact of one body-space point against one wall.
-// n = inward wall normal, pen = penetration of the point's circle.
-// Structure follows Contact_prepare/solveIter: resolve only when approaching,
-// restitution on the normal, velocity-dependent friction on the tangent;
-// the contact-point offset couples the impulses into angular momentum.
-static void solve_wall_pt(body_t* b, float wx, float wy, float pr,
-                          float nx, float ny, float pen) {
-    if (pen <= 0) {
-        return;
-    }
-    const float m = b->prm.mass;
-    const float inv_i = (!b->prm.fixed_rotate && b->prm.inertia > 0)
-                            ? 1.0f / b->prm.inertia : 0.0f;
-    // contact point = the point circle's surface toward the wall
-    const float rx = wx - nx * pr - b->px;
-    const float ry = wy - ny * pr - b->py;
-    const float omega = b->L * inv_i;
-    // velocity at the contact point: v + omega x r
-    const float vx = b->mx / m - omega * ry;
-    const float vy = b->my / m + omega * rx;
-    const float vn = vx * nx + vy * ny;
-    const float tx = -ny, ty = nx;
-    if (vn < 0) { // approaching: normal impulse with restitution
-        const float rn = rx * ny - ry * nx; // r x n
-        const float j = -(1.0f + MAT_RESTITUTION) * vn / (1.0f / m + rn * rn * inv_i);
-        b->mx += j * nx;
-        b->my += j * ny;
-        b->L += (rx * ny - ry * nx) * j;
-    }
-    // friction opposes the contact point's tangential velocity (includes the
-    // rotational term): rolling couples spin<->translation, spin decays on
-    // ground contact instead of persisting forever
-    const float vt = vx * tx + vy * ty;
-    const float rt = rx * ty - ry * tx; // r x t
-    const float jt = -MAT_FRICTION * vt / (1.0f / m + rt * rt * inv_i);
-    b->mx += jt * tx;
-    b->my += jt * ty;
-    b->L += rt * jt;
-    // positional correction (stand-in for the stiffness/penetration term)
-    b->px += nx * pen;
-    b->py += ny * pen;
-}
-
-static void solve_walls(body_t* b) {
-    for (int i = 0; i < b->npts; i++) {
-        const float c = cosf(b->theta), s = sinf(b->theta);
-        const phys_point* p = &b->pts[i];
-        const float wx = b->px + c * p->x - s * p->y;
-        const float wy = b->py + s * p->x + c * p->y;
-        solve_wall_pt(b, wx, wy, p->r, 1, 0, p->r - wx);         // left
-        solve_wall_pt(b, wx, wy, p->r, -1, 0, wx + p->r - P.ww); // right
-        solve_wall_pt(b, wx, wy, p->r, 0, 1, p->r - wy);         // floor
-        solve_wall_pt(b, wx, wy, p->r, 0, -1, wy + p->r - P.wh); // ceiling
-    }
-}
-
-// RK4 over the full coupled system (positions AND momenta, spring forces
-// re-evaluated at every stage). This is what the original's stepOnce does -
-// with joint stiffness up to 6000 at dt=0.01 the rotational spring modes sit
-// beyond explicit Euler's stability limit but inside RK4's (omega*dt < 2.83).
+// RK4 stage state of one body (see the integrator section below)
 typedef struct {
     float px, py, theta;
     float mx, my, L;
 } bstate_t;
 
+// one wall contact of one collision point, evaluated on an arbitrary state.
+// Fills n, r (contact offset), v_cp and returns penetration (<=0 = none).
+typedef struct {
+    float nx, ny;   // inward wall normal
+    float rx, ry;   // contact point - body origin
+    float vx, vy;   // velocity of the contact point
+    float pen;
+} contact_t;
+
+static const float wall_nx[4] = { 1, -1, 0, 0 };
+static const float wall_ny[4] = { 0, 0, 1, -1 };
+
+static bool contact_eval(const body_t* b, const phys_point* p, int wall,
+                         float px, float py, float theta,
+                         float mx, float my, float L, contact_t* out) {
+    const float c = cosf(theta), s = sinf(theta);
+    const float wx = px + c * p->x - s * p->y;
+    const float wy = py + s * p->x + c * p->y;
+    float pen;
+    switch (wall) {
+        case PHYS_WALL_LEFT: pen = p->r - wx; break;
+        case PHYS_WALL_RIGHT: pen = wx + p->r - P.ww; break;
+        case PHYS_WALL_FLOOR: pen = p->r - wy; break;
+        default: pen = wy + p->r - P.wh; break;
+    }
+    if (pen <= 0) {
+        return false;
+    }
+    out->nx = wall_nx[wall];
+    out->ny = wall_ny[wall];
+    out->rx = wx - out->nx * p->r - px;
+    out->ry = wy - out->ny * p->r - py;
+    const float omega = (!b->prm.fixed_rotate && b->prm.inertia > 0)
+                            ? L / b->prm.inertia : 0.0f;
+    out->vx = mx / b->prm.mass - omega * out->ry;
+    out->vy = my / b->prm.mass + omega * out->rx;
+    out->pen = pen;
+    return true;
+}
+
+// normal contact response magnitude, Contact_prepare's exact form:
+//   closing*C0 + pen*C1 + closing*pen*C2, C = 2*ownMaterial
+// (velocityResponse damps the approach, stiffness is the penetration
+// penalty spring, dampener the penetration-scaled damper). The closing-
+// velocity term only acts while approaching (prepare zeroes it otherwise).
+// Interpreted as FORCE (the original folds dt into precomputed body fields);
+// scaled by massWall/massBody and split among the body's contacts on that
+// wall. NO positional correction exists in the original - resting bodies sit
+// on the penalty spring, which is what keeps them jitter-free.
+static float contact_normal_force(const body_t* b, const contact_t* ct) {
+    const float closing = -(ct->vx * ct->nx + ct->vy * ct->ny);
+    const float c0 = 2.0f * b->prm.material[0];
+    const float c1 = 2.0f * b->prm.material[1];
+    const float c2 = 2.0f * b->prm.material[2];
+    const float mag = (closing > 0 ? closing * c0 : 0.0f)
+                    + ct->pen * c1 + closing * ct->pen * c2;
+    return mag * (WALL_MASS / b->prm.mass);
+}
+
+// wall contact forces for one body at a stage state, added into the
+// derivative. Force split among the body's penetrating points per wall
+// (the original splits impulses by the pair's contact count).
+static void derive_wall_contacts(const body_t* b, const bstate_t* s, bstate_t* d) {
+    for (int w = 0; w < 4; w++) {
+        int count = 0;
+        contact_t ct;
+        for (int i = 0; i < b->npts; i++) {
+            if ((b->pts[i].repel >> w) & 1
+                && contact_eval(b, &b->pts[i], w, s->px, s->py, s->theta,
+                                s->mx, s->my, s->L, &ct)) {
+                count++;
+            }
+        }
+        if (!count) {
+            continue;
+        }
+        for (int i = 0; i < b->npts; i++) {
+            const phys_point* p = &b->pts[i];
+            if (!((p->repel >> w) & 1)
+                || !contact_eval(b, p, w, s->px, s->py, s->theta,
+                                 s->mx, s->my, s->L, &ct)) {
+                continue;
+            }
+            const float f = contact_normal_force(b, &ct) / (float)count;
+            d->mx += f * ct.nx;
+            d->my += f * ct.ny;
+            if (((p->rotate >> w) & 1) && !b->prm.fixed_rotate) {
+                d->L += (ct.rx * ct.ny - ct.ry * ct.nx) * f;
+            }
+        }
+    }
+}
+
+// post-integration friction pass, Contact_solveIter's exact form: iterate
+// 4x per contact, each iteration applies the impulse that cancels the
+// contact point's TANGENTIAL velocity (effective-mass weighted), capped by
+// the static-friction cone against this step's normal impulse.
+static void solve_friction(body_t* b) {
+    for (int it = 0; it < FRICTION_ITERATIONS; it++) {
+        for (int w = 0; w < 4; w++) {
+            for (int i = 0; i < b->npts; i++) {
+                const phys_point* p = &b->pts[i];
+                contact_t ct;
+                if (!((p->repel >> w) & 1)
+                    || !contact_eval(b, p, w, b->px, b->py, b->theta,
+                                     b->mx, b->my, b->L, &ct)) {
+                    continue;
+                }
+                const float tx = -ct.ny, ty = ct.nx;
+                const float vt = ct.vx * tx + ct.vy * ty;
+                const bool spin = ((p->rotate >> w) & 1) && !b->prm.fixed_rotate
+                                  && b->prm.inertia > 0;
+                const float crt = ct.rx * ty - ct.ry * tx; // r x t
+                const float denom = 1.0f / b->prm.mass
+                                  + (spin ? crt * crt / b->prm.inertia : 0.0f);
+                float jt = -vt / denom;
+                // static-friction cone vs the step's normal impulse
+                const float ncap = b->prm.material[4]
+                                 * contact_normal_force(b, &ct) * PHYS_DT;
+                if (jt > ncap) {
+                    jt = ncap;
+                } else if (jt < -ncap) {
+                    jt = -ncap;
+                }
+                b->mx += jt * tx;
+                b->my += jt * ty;
+                if (spin) {
+                    b->L += crt * jt;
+                }
+            }
+        }
+    }
+}
+
+// RK4 over the full coupled system (positions AND momenta, spring AND
+// contact forces re-evaluated at every stage). This is what the original's
+// stepOnce does - with joint stiffness up to 6000 at dt=0.01 the rotational
+// spring modes sit beyond explicit Euler's stability limit but inside RK4's
+// (omega*dt < 2.83).
 static bstate_t rk_y[MAX_BODIES];   // stage state
 static bstate_t rk_k[4][MAX_BODIES]; // stage derivatives
 
@@ -226,6 +306,8 @@ static void derive(bstate_t* out) {
             d->my += b->prm.mouse_stiffness * (b->ty - s->py)
                    - b->prm.mouse_dampener * (s->my / b->prm.mass);
         }
+
+        derive_wall_contacts(b, s, d);
     }
 
     // spring joints, same constraint form as the mouse spring (sub_532800):
@@ -291,10 +373,8 @@ static void step_once(void) {
         b->my += h * (k1->my + 2 * k2->my + 2 * k3->my + k4->my);
         b->L += h * (k1->L + 2 * k2->L + 2 * k3->L + k4->L);
 
-        // contacts stay impulse-based on the integrated state
-        for (int it = 0; it < SOLVER_ITERATIONS; it++) {
-            solve_walls(b);
-        }
+        // friction/stick impulses on the integrated state (solveIter's role)
+        solve_friction(b);
     }
 }
 

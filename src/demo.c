@@ -54,10 +54,11 @@ static int make_limb_body(const td_limb* l, float wx, float wy, float scale) {
         for (int p = 0; p < sh->npoints && npts < MAX_SHAPE_PTS; p++) {
             pts[npts++] = (phys_point){ sh->points[p].x * scale,
                                         sh->points[p].y * scale,
-                                        sh->points[p].r * scale };
+                                        sh->points[p].r * scale,
+                                        sh->wall_repel, sh->wall_rotate };
         }
     }
-    const phys_params prm = {
+    phys_params prm = {
         .mass = l->mass,
         .inertia = l->inertia * scale * scale, // def inertia is toy-local units^2
         .gravity = l->has_gravity_override ? l->gravity_override : PHYS_GRAVITY,
@@ -70,6 +71,9 @@ static int make_limb_body(const td_limb* l, float wx, float wy, float scale) {
         .motor_force = { l->motor_force[0], l->motor_force[1] },
         .motor_torque = l->motor_torque,
     };
+    for (int m = 0; m < 5; m++) {
+        prm.material[m] = l->material[m];
+    }
     return phys_body_add(wx + l->rest_pos[0] * scale, wy + l->rest_pos[1] * scale,
                          l->rest_orient, &prm, pts, npts, 0.25f);
 }

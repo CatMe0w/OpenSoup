@@ -15,8 +15,17 @@
 #define PHYS_GRAVITY -18.0f
 #define PHYS_PX_PER_UNIT 100.0f
 
+// wall index bits for the per-shape repel/rotate masks
+// (memberOf groups left_wall_repel, floor_rotate, ... from the toy defs)
+#define PHYS_WALL_LEFT 0
+#define PHYS_WALL_RIGHT 1
+#define PHYS_WALL_FLOOR 2
+#define PHYS_WALL_CEILING 3
+
 typedef struct {
     float x, y, r; // body-local, meters; polygon vertex = r 0, circle = 1 point
+    unsigned char repel;  // bit per wall: contact may apply linear impulse
+    unsigned char rotate; // bit per wall: contact may apply angular impulse
 } phys_point;
 
 typedef struct {
@@ -31,6 +40,10 @@ typedef struct {
     bool fixed_rotate;      // fixedRotate: no angular motion
     float motor_force[2];   // constant linearMotor force, body-local
     float motor_torque;     // constant rotationalMotor torque
+    // CMaterial: velocityResponse, stiffness, dampener, kineticFriction,
+    // staticFriction. Contact response uses the body's OWN material only
+    // (original combines self+self, then scales by the mass ratio).
+    float material[5];
 } phys_params;
 
 void phys_set_world(float width, float height); // wall extents, meters

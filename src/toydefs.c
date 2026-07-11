@@ -60,6 +60,24 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
         td_shape* s = &l->shapes[si++];
         const cJSON* member = cJSON_GetObjectItemCaseSensitive(shape, "memberOf");
         s->collides = cJSON_GetArraySize(member) > 0;
+        static const char* walls[4] = { "left_wall", "right_wall", "floor", "ceiling" };
+        const cJSON* g;
+        cJSON_ArrayForEach(g, member) {
+            if (!cJSON_IsString(g)) {
+                continue;
+            }
+            for (int w = 0; w < 4; w++) {
+                const size_t n = strlen(walls[w]);
+                if (strncmp(g->valuestring, walls[w], n) != 0) {
+                    continue;
+                }
+                if (strcmp(g->valuestring + n, "_repel") == 0) {
+                    s->wall_repel |= (unsigned char)(1 << w);
+                } else if (strcmp(g->valuestring + n, "_rotate") == 0) {
+                    s->wall_rotate |= (unsigned char)(1 << w);
+                }
+            }
+        }
         s->grab = num(shape, "grab", 0) != 0.0f;
         const cJSON* pts = cJSON_GetObjectItemCaseSensitive(shape, "points");
         s->npoints = cJSON_GetArraySize(pts);
