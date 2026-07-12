@@ -38,5 +38,8 @@ int scene_pick(float x_px, float y_px);
 // physics body bound to a sprite, or -1
 int scene_sprite_body(int sprite);
 
+// destroy a sprite and its GPU resources (id becomes invalid)
+void scene_sprite_remove(int sprite);
+
 // raise the sprite's whole toy group to the front (stable within the group)
 void scene_raise(int sprite);

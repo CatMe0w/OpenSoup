@@ -100,6 +100,64 @@ int main(int argc, char** argv) {
             "input grab verification");
     }
 
+    // First scripted toy: the goose. Spin its body past the lay angle and
+    // the script must shoot a GooseEgg (new toy realized mid-simulation);
+    // shrink the egg's lifetime and it must remove itself (full teardown).
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        ok = rbh_load_toy_class("GooseEgg", dir)
+          && rbh_spawn_toy("Goose", dir, 9.0, 3.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "goose = $default_engine.toys.find {|t| t.toy_id == 'Goose'}\n"
+            "raise 'goose missing' unless goose\n"
+            "raise 'goose class' unless goose.is_a?(Goose)\n"
+            "raise 'lay sound' unless goose.sounds.by_sid(:lay)\n"
+            "before = $default_engine.toys.count\n"
+            "body = goose.limbs.by_sid(:goosebody)\n"
+            "20.times do\n"  // rock the body across the lay angle
+            "  body.orientation = 0.0\n"
+            "  $default_engine.run_steps(1); $default_engine.dispatch_timers(1)\n"
+            "  body.orientation = -Math::PI / 2.0\n"
+            "  $default_engine.run_steps(1); $default_engine.dispatch_timers(1)\n"
+            "  break if $default_engine.toys.count > before\n"
+            "end\n"
+            "raise 'no egg laid' unless $default_engine.toys.count == before + 1\n"
+            "egg = $default_engine.toys.by_index($default_engine.toys.count - 1)\n"
+            "raise 'egg class' unless egg.is_a?(GooseEgg)\n"
+            "m = egg.limbs.by_sid(:egg).momentum\n"
+            "STDERR.puts format('rubyboot: egg laid, momentum %.2f,%.2f', m.x, m.y)\n"
+            "raise 'egg momentum' unless m.x < -5.0\n"
+            "egg.lifetime = 3\n"
+            "$default_engine.dispatch_timers(5)\n"
+            "raise 'egg not removed' unless $default_engine.toys.count == before\n"
+            "raise 'egg still realized' unless egg.limbs.by_sid(:egg).engine.nil?\n",
+            "goose verification");
+    }
+
+    // Rotational grab: the goose body is move=0/rotate=1 and hangs on a
+    // rotational joint - pulling the grab anchor sideways must TWIST it
+    // past the lay angle, which lays an egg through the timer script.
+    if (ok) {
+        ok = rbh_eval(
+            "goose = $default_engine.toys.find {|t| t.toy_id == 'Goose'}\n"
+            "body = goose.limbs.by_sid(:goosebody)\n"
+            "80.times { $default_engine.run_steps(10); $default_engine.dispatch_timers(10) }\n"
+            "raise format('goose not upright (%.2f)', body.orientation) unless body.orientation.abs < 0.3\n"
+            "before = $default_engine.toys.count\n"
+            "input = $default_engine.input_by_id(:default)\n"
+            "$default_engine.input_grab(body, input, body.position + Vector[0.0, 0.3])\n"
+            "$default_engine.input_move(input, body.position + Vector[0.6, -0.1])\n"
+            "30.times { $default_engine.run_steps(10); $default_engine.dispatch_timers(10) }\n"
+            "STDERR.puts format('rubyboot: goose twisted to %.2f rad', body.orientation)\n"
+            "raise 'goose did not rotate' unless body.orientation < -0.6\n"
+            "raise 'no egg from rocking' unless $default_engine.toys.count > before\n"
+            "$default_engine.input_release(body, input, body.position)\n",
+            "rotational grab verification");
+    }
+
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");
     rbh_shutdown();
     return ok ? 0 : 1;

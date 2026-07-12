@@ -17,6 +17,7 @@ typedef struct {
 } td_point;
 
 typedef struct {
+    char* sid;     // scripts address shapes via shapes.by_sid(:sid)
     bool collides; // memberOf non-empty: participates in collision
     bool grab;     // mouse-interaction shape
     // per-wall permission bits (PHYS_WALL_*) from the memberOf groups
@@ -69,13 +70,32 @@ typedef struct {
 } td_joint;
 
 typedef struct {
+    int limb1, limb2;
+    float orientation1, orientation2;
+    // decoded field order [rest, stiffness, dampener] matches the linear
+    // joint tail; not yet byte-verified against the binary (schema TODO)
+    float rest;
+    float stiffness;
+    float dampener;
+} td_rotjoint;
+
+typedef struct {
+    char* sid;      // scripts look sounds up via sounds.by_sid(:sid)
+    char* location; // ogg path relative to <root>/defs/
+} td_sound;
+
+typedef struct {
     const char* class_name;
     const char* root; // container dir under the assets root (toy scripts live there)
     float base_scale;
     int nlimbs;
     td_limb* limbs;
     int njoints;
-    td_joint* joints; // spring joints; rotationalJoints not consumed yet
+    td_joint* joints;
+    int nrotjoints;
+    td_rotjoint* rotjoints;
+    int nsounds;
+    td_sound* sounds; // toy-level sound emitters
 } toydef_t;
 
 bool toydefs_load(const char* json_path);

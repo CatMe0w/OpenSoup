@@ -58,6 +58,7 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
     const cJSON* shape;
     cJSON_ArrayForEach(shape, shapes) {
         td_shape* s = &l->shapes[si++];
+        s->sid = dupstr(shape, "sid");
         const cJSON* member = cJSON_GetObjectItemCaseSensitive(shape, "memberOf");
         s->collides = cJSON_GetArraySize(member) > 0;
         static const char* walls[4] = { "left_wall", "right_wall", "floor", "ceiling" };
@@ -201,6 +202,40 @@ bool toydefs_load(const char* json_path) {
             j->rest_length = num(joint, "restLength", 0.0f);
             j->stiffness = num(joint, "stiffness", 0.0f);
             j->dampener = num(joint, "dampener", 0.0f);
+        }
+
+        const cJSON* rjs = cJSON_GetObjectItemCaseSensitive(toy, "rotationalJoints");
+        d->nrotjoints = cJSON_GetArraySize(rjs);
+        d->rotjoints = calloc((size_t)d->nrotjoints ? (size_t)d->nrotjoints : 1,
+                              sizeof(td_rotjoint));
+        int ri = 0;
+        const cJSON* rj;
+        cJSON_ArrayForEach(rj, rjs) {
+            td_rotjoint* r = &d->rotjoints[ri++];
+            char* n1 = dupstr(rj, "limb1");
+            char* n2 = dupstr(rj, "limb2");
+            r->limb1 = limb_index(d, n1);
+            r->limb2 = limb_index(d, n2);
+            free(n1);
+            free(n2);
+            r->orientation1 = num(rj, "orientation1", 0.0f);
+            r->orientation2 = num(rj, "orientation2", 0.0f);
+            const cJSON* fields = cJSON_GetObjectItemCaseSensitive(rj, "fields");
+            r->rest = idx(fields, 0, 0.0f);
+            r->stiffness = idx(fields, 1, 0.0f);
+            r->dampener = idx(fields, 2, 0.0f);
+        }
+
+        const cJSON* sounds = cJSON_GetObjectItemCaseSensitive(toy, "sounds");
+        d->nsounds = cJSON_GetArraySize(sounds);
+        d->sounds = calloc((size_t)d->nsounds ? (size_t)d->nsounds : 1,
+                           sizeof(td_sound));
+        int si = 0;
+        const cJSON* sound;
+        cJSON_ArrayForEach(sound, sounds) {
+            d->sounds[si].sid = dupstr(sound, "sid");
+            d->sounds[si].location = dupstr(sound, "location");
+            si++;
         }
     }
     cJSON_Delete(root);

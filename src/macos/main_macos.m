@@ -52,6 +52,7 @@ static void to_px(NSPoint p, float* x, float* y) {
 // framework's default grab (limb.rb) drives engine.input_grab/move/release.
 // captured = the mouse-downed sprite, our stand-in for Win32 mouse capture.
 static int captured_sprite = -1;
+static float down_pos[2];
 - (void)mouseDown:(NSEvent*)event {
     float x, y;
     to_px([event locationInWindow], &x, &y);
@@ -59,6 +60,8 @@ static int captured_sprite = -1;
     if (sprite >= 0) {
         scene_raise(sprite);
         captured_sprite = sprite;
+        down_pos[0] = x;
+        down_pos[1] = y;
         rbh_mouse_down(sprite, x, y, 1);
     }
 }
@@ -74,6 +77,10 @@ static int captured_sprite = -1;
         float x, y;
         to_px([event locationInWindow], &x, &y);
         rbh_mouse_up(captured_sprite, x, y, 1);
+        // barely-moved release = click (Win32 sends it on button release)
+        if (fabsf(x - down_pos[0]) < 4 && fabsf(y - down_pos[1]) < 4) {
+            rbh_mouse_click(captured_sprite, x, y, 1);
+        }
         captured_sprite = -1;
     }
 }

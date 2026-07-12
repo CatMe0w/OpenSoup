@@ -15,6 +15,7 @@ typedef struct {
     int speed_ms;
     double acc_ms;
     sg_view views[MAX_FRAMES];
+    sg_image imgs[MAX_FRAMES]; // kept for teardown
     uint8_t* const* pixels; // borrowed premultiplied RGBA, for alpha hit-test
     int body;               // physics body index or -1
     float ax, ay;           // body origin in canvas px relative to centre, y-down
@@ -166,13 +167,14 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->ay = 0;
     s->group = group;
     for (int f = 0; f < nframes; f++) {
+        s->imgs[f] = sg_make_image(&(sg_image_desc){
+            .width = w,
+            .height = h,
+            .pixel_format = SG_PIXELFORMAT_RGBA8,
+            .data.mip_levels[0] = { .ptr = frames[f], .size = (size_t)w * h * 4 },
+        });
         s->views[f] = sg_make_view(&(sg_view_desc){
-            .texture.image = sg_make_image(&(sg_image_desc){
-                .width = w,
-                .height = h,
-                .pixel_format = SG_PIXELFORMAT_RGBA8,
-                .data.mip_levels[0] = { .ptr = frames[f], .size = (size_t)w * h * 4 },
-            }),
+            .texture.image = s->imgs[f],
         });
     }
     return s->id;
@@ -190,6 +192,22 @@ void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y
 int scene_sprite_body(int sprite) {
     const sprite_t* s = by_id(sprite);
     return s ? s->body : -1;
+}
+
+void scene_sprite_remove(int sprite) {
+    sprite_t* s = by_id(sprite);
+    if (!s) {
+        return;
+    }
+    for (int f = 0; f < s->nframes; f++) {
+        sg_destroy_view(s->views[f]);
+        sg_destroy_image(s->imgs[f]);
+    }
+    const int idx = (int)(s - state.sprites);
+    for (int k = idx; k < state.nsprites - 1; k++) {
+        state.sprites[k] = state.sprites[k + 1];
+    }
+    state.nsprites--;
 }
 
 void scene_frame(const sg_swapchain* swapchain, double dt_ms) {

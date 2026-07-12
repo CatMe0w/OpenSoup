@@ -60,6 +60,13 @@ float phys_body_orientation(int body); // radians, CCW positive, unbounded
 // teleport (script-driven placement); momenta are left untouched
 void phys_body_set_pose(int body, float x, float y, float theta);
 
+void phys_body_momentum(int body, float* mx, float* my, float* L);
+void phys_body_set_momentum(int body, float mx, float my, float L);
+
+// retire a body: no motion, no contacts, joints on it are neutralized;
+// the slot is reused by the next phys_body_add
+void phys_body_free(int body);
+
 // spring joint between two bodies, anchors in body-local meters:
 // F = stiffness * (|d| - restLength) * dir - dampener * relative anchor
 // velocity, applied at the anchors (torque from the offset).
@@ -67,13 +74,21 @@ int phys_joint_add(int body1, float a1x, float a1y,
                    int body2, float a2x, float a2y,
                    float rest_length, float stiffness, float dampener);
 
-// grabbing = mouse spring, exactly the original's constraint (sub_532800):
-// F = stiffness * (target - pos) - dampener * vel, applied to momentum each step.
+// rotational joint: torque spring on the relative orientation of two limbs
+// (the goose rocks on one). rest/stiffness/dampener from the def's
+// rotationalJoints entry.
+int phys_rotjoint_add(int body1, float o1, int body2, float o2,
+                      float rest, float stiffness, float dampener);
+
+// grabbing = mouse spring at the GRAB ANCHOR (sub_532800 form, constructed
+// per sub_4237B0): F = stiffness * (target - anchor_pos) - dampener *
+// anchor_vel. move gates the linear component, rotate the torque component
+// (goose body: move=0 rotate=1 - dragging only twists it about its hip).
 // Defaults from the Limb ctor (0x548410): stiffness=150, dampener=5,
 // overridable per limb via mouse_*_override.
 #define PHYS_MOUSE_STIFFNESS 150.0f
 #define PHYS_MOUSE_DAMPENER 5.0f
 
-void phys_grab(int body);
+void phys_grab(int body, float ax, float ay, bool move, bool rotate);
 void phys_grab_move(int body, float x, float y); // updates spring target
 void phys_release(int body);

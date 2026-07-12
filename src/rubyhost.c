@@ -7,6 +7,7 @@
 #include "physics.h"
 #include "toydefs.h"
 #include "toyphys.h"
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +57,8 @@ typedef struct {
     const td_joint* jdef;   // joint node
     int body;               // SN_LIMB: phys body index, -1 = not realized
     double px, py, orient, shock;
+    double mx, my, mL;      // SN_LIMB: momentum, pre-realization only
+    double lscale;          // SN_LIMB: owning toy's base_scale (unit conv)
     VALUE inputs;           // SN_ENGINE
     VALUE timers;           // SN_ENGINE: [[proc, period_ticks, next_tick]...]
     double timer_tick;      // SN_ENGINE: dispatch_timers position, 1/100 s
@@ -139,8 +142,12 @@ static void* g_sprite_user;
 #define MAX_SCENE_SPRITES 1024
 static VALUE g_scene_sprite[MAX_SCENE_SPRITES];
 
-void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user) {
+static rbh_sprite_remove_fn g_sprite_remove_fn;
+
+void rbh_set_sprite_hook(rbh_sprite_fn fn, rbh_sprite_remove_fn remove_fn,
+                         void* user) {
     g_sprite_fn = fn;
+    g_sprite_remove_fn = remove_fn;
     g_sprite_user = user;
 }
 
@@ -164,6 +171,10 @@ static void toy_realize(VALUE toyv) {
             ln->body = toyphys_body_for_limb(ln->ldef, (float)ln->px,
                                              (float)ln->py,
                                              (float)ln->orient, S);
+            if (ln->body >= 0 && (ln->mx || ln->my || ln->mL)) {
+                phys_body_set_momentum(ln->body, (float)ln->mx, (float)ln->my,
+                                       (float)ln->mL);
+            }
         }
     }
 
@@ -182,6 +193,19 @@ static void toy_realize(VALUE toyv) {
         phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
                        b2, j->anchor2[0] * S, j->anchor2[1] * S,
                        j->rest_length * S, j->stiffness, j->dampener);
+    }
+
+    for (int i = 0; i < t->def->nrotjoints; i++) {
+        const td_rotjoint* r = &t->def->rotjoints[i];
+        if (r->limb1 < 0 || r->limb2 < 0) {
+            continue;
+        }
+        const int b1 = sn_get(rb_ary_entry(limbs, r->limb1))->body;
+        const int b2 = sn_get(rb_ary_entry(limbs, r->limb2))->body;
+        if (b1 >= 0 && b2 >= 0) {
+            phys_rotjoint_add(b1, r->orientation1, b2, r->orientation2,
+                              r->rest, r->stiffness, r->dampener);
+        }
     }
 
     if (!g_sprite_fn) {
@@ -208,7 +232,9 @@ static void toy_realize(VALUE toyv) {
         const int body = vis[a].body;
         const VALUE node = vis[a].node;
         int b = a;
-        while (b > 0 && vis[b - 1].sp->z_order < sp->z_order) {
+        // <=: on equal zOrder later def entries draw FIRST (goose legs sit
+        // behind the body although both are -50)
+        while (b > 0 && vis[b - 1].sp->z_order <= sp->z_order) {
             vis[b] = vis[b - 1];
             b--;
         }
@@ -222,6 +248,48 @@ static void toy_realize(VALUE toyv) {
                                    t->instance_id, g_sprite_user);
         if (id >= 0 && id < MAX_SCENE_SPRITES) {
             g_scene_sprite[id] = vis[i].node;
+            sn_get(vis[i].node)->body = id; // sprite node: scene sprite id
+        }
+    }
+}
+
+// Leaving the engine tears the toy back down: phys bodies freed (joints on
+// them are neutralized), scene sprites removed via the app hook. Stored
+// limb state keeps the last pose so a re-add realizes in place.
+static void toy_unrealize(VALUE toyv) {
+    sn_t* t = sn_get(toyv);
+    if (!t->realized) {
+        return;
+    }
+    t->realized = 0;
+    VALUE limbs = sn_get(t->colls[1])->items;
+    for (long i = 0; i < RARRAY(limbs)->len; i++) {
+        sn_t* ln = sn_get(rb_ary_entry(limbs, i));
+        if (ln->body >= 0) {
+            float x, y, mx, my, L;
+            phys_body_pos(ln->body, &x, &y);
+            phys_body_momentum(ln->body, &mx, &my, &L);
+            ln->px = x;
+            ln->py = y;
+            ln->orient = phys_body_orientation(ln->body);
+            ln->mx = mx;
+            ln->my = my;
+            ln->mL = L;
+            phys_body_free(ln->body);
+            ln->body = -1;
+        }
+        VALUE sprites = sn_get(ln->colls[0])->items;
+        for (long sp = 0; sp < RARRAY(sprites)->len; sp++) {
+            sn_t* spn = sn_get(rb_ary_entry(sprites, sp));
+            if (spn->body >= 0) {
+                if (g_sprite_remove_fn) {
+                    g_sprite_remove_fn(spn->body, g_sprite_user);
+                }
+                if (spn->body < MAX_SCENE_SPRITES) {
+                    g_scene_sprite[spn->body] = 0;
+                }
+                spn->body = -1;
+            }
         }
     }
 }
@@ -246,9 +314,12 @@ static void sn_set_engine(VALUE nodev, VALUE eng) {
             sn_set_engine(n->colls[i], eng);
         }
     }
-    if (n->kind == SN_TOY && !NIL_P(eng)
-        && eng == rb_gv_get("$default_engine")) {
-        toy_realize(nodev);
+    if (n->kind == SN_TOY) {
+        if (!NIL_P(eng) && eng == rb_gv_get("$default_engine")) {
+            toy_realize(nodev);
+        } else if (NIL_P(eng)) {
+            toy_unrealize(nodev);
+        }
     }
     rb_funcall(nodev, rb_intern("engine_changed"), 2, old, eng);
 }
@@ -292,6 +363,7 @@ static VALUE alloc_limb_at(const td_limb* l, double base_scale) {
     VALUE v = sn_wrap(cls_find("Limb"), SN_LIMB);
     sn_t* n = sn_get(v);
     n->ldef = l;
+    n->lscale = base_scale;
     n->colls[0] = coll_new_named("SpriteContainer", v, Qnil);
     n->colls[1] = coll_new_named("ShapeContainer", v, Qnil);
     n->colls[2] = coll_new_named("LinearMotorContainer", v, Qnil);
@@ -309,8 +381,12 @@ static VALUE alloc_limb_at(const td_limb* l, double base_scale) {
         }
         for (int i = 0; i < l->nshapes; i++) {
             VALUE sh = sn_wrap(cls_find("Shape"), SN_GENERIC);
-            sn_get(sh)->shdef = &l->shapes[i];
-            sn_get(sh)->parent = n->colls[1];
+            sn_t* shn = sn_get(sh);
+            shn->shdef = &l->shapes[i];
+            if (l->shapes[i].sid && l->shapes[i].sid[0]) {
+                shn->sid = ID2SYM(rb_intern(l->shapes[i].sid));
+            }
+            shn->parent = n->colls[1];
             rb_ary_push(sn_get(n->colls[1])->items, sh);
         }
     }
@@ -361,7 +437,16 @@ static VALUE alloc_toy(VALUE klass) {
             }
             rb_ary_push(joints->items, jv);
         }
-        // TODO: rotational joints, motors, sounds (defs not consumed yet)
+        sn_t* sounds = sn_get(n->colls[5]);
+        for (int i = 0; i < n->def->nsounds; i++) {
+            VALUE sv = sn_wrap(cls_find("Sound"), SN_GENERIC);
+            if (n->def->sounds[i].sid && n->def->sounds[i].sid[0]) {
+                sn_get(sv)->sid = ID2SYM(rb_intern(n->def->sounds[i].sid));
+            }
+            sn_get(sv)->parent = n->colls[5];
+            rb_ary_push(sounds->items, sv);
+        }
+        // TODO: rotational joints, motors (defs not consumed yet)
     }
     return self;
 }
@@ -534,6 +619,90 @@ static VALUE limb_shock_order(VALUE self) {
 static VALUE limb_shock_order_set(VALUE self, VALUE v) {
     sn_get(self)->shock = NUM2DBL(v);
     return v;
+}
+
+static void limb_pose(sn_t* n, double* x, double* y, double* th) {
+    if (n->body >= 0) {
+        float px, py;
+        phys_body_pos(n->body, &px, &py);
+        *x = px;
+        *y = py;
+        *th = phys_body_orientation(n->body);
+    } else {
+        *x = n->px;
+        *y = n->py;
+        *th = n->orient;
+    }
+}
+
+static VALUE limb_to_world(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y, th, lx, ly;
+    limb_pose(n, &x, &y, &th);
+    vec_get(v, &lx, &ly);
+    const double c = cos(th), sn = sin(th);
+    return vec_new(x + c * lx - sn * ly, y + sn * lx + c * ly);
+}
+
+static VALUE limb_to_local(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y, th, wx, wy;
+    limb_pose(n, &x, &y, &th);
+    vec_get(v, &wx, &wy);
+    const double c = cos(th), sn = sin(th);
+    const double dx = wx - x, dy = wy - y;
+    return vec_new(c * dx + sn * dy, -sn * dx + c * dy);
+}
+
+static VALUE limb_momentum(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (n->body >= 0) {
+        float mx, my, L;
+        phys_body_momentum(n->body, &mx, &my, &L);
+        return vec_new(mx, my);
+    }
+    return vec_new(n->mx, n->my);
+}
+
+static VALUE limb_momentum_set(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    vec_get(v, &n->mx, &n->my);
+    if (n->body >= 0) {
+        float mx, my, L;
+        phys_body_momentum(n->body, &mx, &my, &L);
+        phys_body_set_momentum(n->body, (float)n->mx, (float)n->my, L);
+    }
+    return v;
+}
+
+static VALUE limb_angular_momentum(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (n->body >= 0) {
+        float mx, my, L;
+        phys_body_momentum(n->body, &mx, &my, &L);
+        return rb_float_new(L);
+    }
+    return rb_float_new(n->mL);
+}
+
+static VALUE limb_angular_momentum_set(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    n->mL = NUM2DBL(v);
+    if (n->body >= 0) {
+        float mx, my, L;
+        phys_body_momentum(n->body, &mx, &my, &L);
+        phys_body_set_momentum(n->body, mx, my, (float)n->mL);
+    }
+    return v;
+}
+
+static VALUE limb_inertia_tensor(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (!n->ldef) {
+        return Qnil;
+    }
+    // def inertia is toy-local units^2; scripts expect world units
+    return rb_float_new(n->ldef->inertia * n->lscale * n->lscale);
 }
 
 static VALUE limb_mass(VALUE self) {
@@ -713,9 +882,10 @@ static VALUE eng_scene_to_view(VALUE self, VALUE v) {
     return eng_canvas_to_view(self, eng_scene_to_canvas(self, v));
 }
 
-// Input grab triplet - the mouse spring. Our phys spring targets the body
-// ORIGIN, so the grab-point offset (body - grab pos, scene meters) is kept
-// on the RInput and re-applied on every move.
+// Input grab triplet - the mouse spring, anchored at the grabbed point
+// (sub_4237B0): the limb's default_grab_move/rotate flags gate the spring's
+// linear/torque components. TODO: per-shape grabMove/grabRotate override of
+// the limb defaults (needs a point-in-shape test on the hit shape).
 static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
     (void)self;
     sn_t* ln = sn_get(limb);
@@ -725,10 +895,13 @@ static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
         vec_get(pos, &px, &py);
         float bx, by;
         phys_body_pos(ln->body, &bx, &by);
+        const float th = phys_body_orientation(ln->body);
+        const float c = cosf(th), sn = sinf(th);
+        const float dx = (float)px - bx, dy = (float)py - by;
         in->ref1 = limb;
-        in->px = bx - px;
-        in->py = by - py;
-        phys_grab(ln->body);
+        phys_grab(ln->body, c * dx + sn * dy, -sn * dx + c * dy,
+                  ln->ldef ? ln->ldef->default_grab_move : true,
+                  ln->ldef ? ln->ldef->default_grab_rotate : true);
     }
     return Qnil;
 }
@@ -741,8 +914,7 @@ static VALUE eng_input_move(VALUE self, VALUE input, VALUE pos) {
         if (ln->body >= 0) {
             double px, py;
             vec_get(pos, &px, &py);
-            phys_grab_move(ln->body, (float)(px + in->px),
-                           (float)(py + in->py));
+            phys_grab_move(ln->body, (float)px, (float)py);
         }
     }
     return Qnil;
@@ -766,6 +938,24 @@ static VALUE eng_input_release(VALUE self, VALUE limb, VALUE input,
 
 static VALUE input_limb(VALUE self) {
     return sn_get(self)->ref1;
+}
+
+// Shape trigger groups: stored only for now; trigger EVENTS arrive with
+// toy-vs-toy collision (not implemented yet)
+static VALUE shape_trigger_on(VALUE self) {
+    VALUE v = sn_get(self)->ref1;
+    return NIL_P(v) ? rb_ary_new() : v;
+}
+
+static VALUE shape_trigger_on_set(VALUE self, VALUE v) {
+    sn_get(self)->ref1 = v;
+    return v;
+}
+
+// the limb a shape belongs to (shape.parent = ShapeContainer, .parent = limb)
+static VALUE shape_limb(VALUE self) {
+    VALUE coll = sn_get(self)->parent;
+    return NIL_P(coll) ? Qnil : sn_get(coll)->parent;
 }
 
 static VALUE eng_scale(VALUE self) {
@@ -1060,6 +1250,13 @@ static void define_real(void) {
     rb_define_method(c, "shock_order=", limb_shock_order_set, 1);
     rb_define_method(c, "mass", limb_mass, 0);
     rb_define_method(c, "fixed_move", limb_fixed_move, 0);
+    rb_define_method(c, "to_world", limb_to_world, 1);
+    rb_define_method(c, "to_local", limb_to_local, 1);
+    rb_define_method(c, "momentum", limb_momentum, 0);
+    rb_define_method(c, "momentum=", limb_momentum_set, 1);
+    rb_define_method(c, "angular_momentum", limb_angular_momentum, 0);
+    rb_define_method(c, "angular_momentum=", limb_angular_momentum_set, 1);
+    rb_define_method(c, "inertia_tensor", limb_inertia_tensor, 0);
 
     c = cls_find("REngine");
     rb_define_method(c, "toys", eng_toys, 0);
@@ -1108,6 +1305,11 @@ static void define_real(void) {
 
     c = cls_find("RInput");
     rb_define_method(c, "limb", input_limb, 0);
+
+    c = cls_find("Shape");
+    rb_define_method(c, "trigger_on", shape_trigger_on, 0);
+    rb_define_method(c, "trigger_on=", shape_trigger_on_set, 1);
+    rb_define_method(c, "limb", shape_limb, 0);
 
     c = cls_find("Souptoys");
     rb_define_method(c, "resource_exists", soup_resource_exists, 1);
@@ -1310,14 +1512,32 @@ bool rbh_boot(const char* scripts_root) {
     return true;
 }
 
+// Kernel#load only honours $LOAD_PATH (cleared at boot) for relative paths,
+// so toy-class dirs must reach Ruby as ABSOLUTE paths or the resolver
+// silently falls back to a script-less Toy subclass.
+static const char* abs_dir(const char* dir, char* buf) {
+    if (!dir) {
+        return ".";
+    }
+    return realpath(dir, buf) ? buf : dir;
+}
+
+bool rbh_load_toy_class(const char* class_name, const char* class_dir) {
+    char abs[1024], code[2048];
+    snprintf(code, sizeof code,
+             "ToyClassResolver.load_toy_class('%s', Pathname.new('%s'))\n",
+             class_name, abs_dir(class_dir, abs));
+    return rbh_eval(code, class_name);
+}
+
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m) {
-    char code[1024];
+    char abs[1024], code[2048];
     snprintf(code, sizeof code,
              "t = ToyClassResolver.load_toy_class('%s', Pathname.new('%s')).new\n"
              "t.move(Vector[%.6f, %.6f])\n"
              "$default_engine.toys << t\n",
-             class_name, class_dir ? class_dir : ".", x_m, y_m);
+             class_name, abs_dir(class_dir, abs), x_m, y_m);
     return rbh_eval(code, class_name);
 }
 
@@ -1356,6 +1576,14 @@ void rbh_mouse_up(int sprite, double x_px, double y_px, int button) {
     if (!NIL_P(sp)) {
         fcall_protected(sp, "internal_mouse_up", 2, vec_new(x_px, y_px),
                         INT2FIX(button), Qnil, "mouse_up");
+    }
+}
+
+void rbh_mouse_click(int sprite, double x_px, double y_px, int button) {
+    VALUE sp = sprite_node(sprite);
+    if (!NIL_P(sp)) {
+        fcall_protected(sp, "internal_mouse_click", 2, vec_new(x_px, y_px),
+                        INT2FIX(button), Qnil, "mouse_click");
     }
 }
 

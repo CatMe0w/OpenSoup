@@ -20,8 +20,19 @@ typedef struct {
     int npts;
     phys_params prm;
     bool grabbed;
+    bool dead;      // freed slot, reusable; anchored+0 pts = fully inert
     float tx, ty;   // mouse spring target while grabbed
+    float gax, gay; // grab anchor, body-local (the point that was clicked)
+    bool gmove;     // grab flags (sub_4237B0): move gates the linear part
+    bool grot;      // of the anchor spring, rotate gates the torque part
 } body_t;
+
+// rotational joint: orientation spring, torque on the relative angle
+typedef struct {
+    int b1, b2;
+    float o1, o2;  // reference orientations from the def
+    float rest, k, c;
+} rotjoint_t;
 
 typedef struct {
     int b1, b2;
@@ -35,6 +46,8 @@ static struct {
     int nbodies;
     joint_t joints[MAX_JOINTS];
     int njoints;
+    rotjoint_t rotjoints[MAX_JOINTS];
+    int nrotjoints;
 } P;
 
 // classic RK4 stage time offsets, rk4_stage_coeffs @0x6D6BA0
@@ -47,10 +60,21 @@ void phys_set_world(float width, float height) {
 
 int phys_body_add(float x, float y, float theta, const phys_params* p,
                   const phys_point* pts, int npts, float fallback_radius) {
-    if (P.nbodies >= MAX_BODIES) {
-        return -1;
+    int slot = -1;
+    for (int i = 0; i < P.nbodies; i++) {
+        if (P.bodies[i].dead) {
+            slot = i;
+            break;
+        }
     }
-    body_t* b = &P.bodies[P.nbodies];
+    if (slot < 0) {
+        if (P.nbodies >= MAX_BODIES) {
+            return -1;
+        }
+        slot = P.nbodies++;
+    }
+    body_t* b = &P.bodies[slot];
+    b->dead = false;
     b->px = x;
     b->py = y;
     b->mx = 0;
@@ -70,7 +94,7 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
     }
     b->prm = *p;
     b->grabbed = false;
-    return P.nbodies++;
+    return slot;
 }
 
 int phys_joint_add(int body1, float a1x, float a1y,
@@ -82,6 +106,16 @@ int phys_joint_add(int body1, float a1x, float a1y,
     P.joints[P.njoints] = (joint_t){ body1, body2, a1x, a1y, a2x, a2y,
                                      rest_length, stiffness, dampener };
     return P.njoints++;
+}
+
+int phys_rotjoint_add(int body1, float o1, int body2, float o2,
+                      float rest, float stiffness, float dampener) {
+    if (P.nrotjoints >= MAX_JOINTS || body1 < 0 || body2 < 0) {
+        return -1;
+    }
+    P.rotjoints[P.nrotjoints] = (rotjoint_t){ body1, body2, o1, o2,
+                                              rest, stiffness, dampener };
+    return P.nrotjoints++;
 }
 
 // RK4 stage state of one body (see the integrator section below)
@@ -300,11 +334,25 @@ static void derive(bstate_t* out) {
             d->L += b->prm.motor_torque;
         }
 
-        if (b->grabbed) { // mouse spring (sub_532800 form)
-            d->mx += b->prm.mouse_stiffness * (b->tx - s->px)
-                   - b->prm.mouse_dampener * (s->mx / b->prm.mass);
-            d->my += b->prm.mouse_stiffness * (b->ty - s->py)
-                   - b->prm.mouse_dampener * (s->my / b->prm.mass);
+        if (b->grabbed) { // mouse spring at the grab anchor (sub_532800 form;
+                          // move/rotate flags gate the two components, so a
+                          // rotate-only limb like the goose body only twists)
+            float px, py, vx, vy;
+            anchor_state(s, b, b->gax, b->gay, &px, &py, &vx, &vy);
+            const float fx = b->prm.mouse_stiffness * (b->tx - px)
+                           - b->prm.mouse_dampener * vx;
+            const float fy = b->prm.mouse_stiffness * (b->ty - py)
+                           - b->prm.mouse_dampener * vy;
+            if (b->gmove) {
+                d->mx += fx;
+                d->my += fy;
+            }
+            if (b->grot && !b->prm.fixed_rotate) {
+                const float c = cosf(s->theta), sn = sinf(s->theta);
+                const float rx = c * b->gax - sn * b->gay;
+                const float ry = sn * b->gax + c * b->gay;
+                d->L += rx * fy - ry * fx;
+            }
         }
 
         derive_wall_contacts(b, s, d);
@@ -333,6 +381,29 @@ static void derive(bstate_t* out) {
         const float fy = j->k * dy - j->c * (v1y - v2y);
         force_at(&out[j->b1], &rk_y[j->b1], b1, j->a1x, j->a1y, fx, fy);
         force_at(&out[j->b2], &rk_y[j->b2], b2, j->a2x, j->a2y, -fx, -fy);
+    }
+
+    // rotational joints: torque spring on the relative orientation
+    // (the goose's "Upright" is k=1 c=0.5 against its anchored legs).
+    // Exact original field mapping still unverified: fields read as
+    // [rest, stiffness, dampener] - see schema TODO.
+    for (int i = 0; i < P.nrotjoints; i++) {
+        const rotjoint_t* rj = &P.rotjoints[i];
+        const body_t* b1 = &P.bodies[rj->b1];
+        const body_t* b2 = &P.bodies[rj->b2];
+        const float w1 = (!b1->prm.fixed_rotate && b1->prm.inertia > 0)
+                             ? rk_y[rj->b1].L / b1->prm.inertia : 0.0f;
+        const float w2 = (!b2->prm.fixed_rotate && b2->prm.inertia > 0)
+                             ? rk_y[rj->b2].L / b2->prm.inertia : 0.0f;
+        const float rel = (rk_y[rj->b1].theta - rj->o1)
+                        - (rk_y[rj->b2].theta - rj->o2);
+        const float tau = -rj->k * (rel - rj->rest) - rj->c * (w1 - w2);
+        if (!b1->prm.anchored && !b1->prm.fixed_rotate) {
+            out[rj->b1].L += tau;
+        }
+        if (!b2->prm.anchored && !b2->prm.fixed_rotate) {
+            out[rj->b2].L -= tau;
+        }
     }
 }
 
@@ -400,11 +471,58 @@ void phys_body_set_pose(int body, float x, float y, float theta) {
     b->theta = theta;
 }
 
-void phys_grab(int body) {
+void phys_body_momentum(int body, float* mx, float* my, float* L) {
+    const body_t* b = &P.bodies[body];
+    *mx = b->mx;
+    *my = b->my;
+    *L = b->L;
+}
+
+void phys_body_set_momentum(int body, float mx, float my, float L) {
+    body_t* b = &P.bodies[body];
+    b->mx = mx;
+    b->my = my;
+    b->L = L;
+}
+
+void phys_body_free(int body) {
+    body_t* b = &P.bodies[body];
+    b->dead = true;
+    b->grabbed = false;
+    // fully inert: integrator skips anchored bodies, no points = no contacts
+    b->prm.anchored = true;
+    b->prm.fixed_rotate = true;
+    b->mx = b->my = b->L = 0;
+    free(b->pts);
+    b->pts = NULL;
+    b->npts = 0;
+    for (int i = 0; i < P.njoints; i++) {
+        joint_t* j = &P.joints[i];
+        if (j->b1 == body || j->b2 == body) {
+            j->k = 0; // neutralized; joint slots are not reused yet
+            j->c = 0;
+        }
+    }
+    for (int i = 0; i < P.nrotjoints; i++) {
+        rotjoint_t* rj = &P.rotjoints[i];
+        if (rj->b1 == body || rj->b2 == body) {
+            rj->k = 0;
+            rj->c = 0;
+        }
+    }
+}
+
+void phys_grab(int body, float ax, float ay, bool move, bool rotate) {
     body_t* b = &P.bodies[body];
     b->grabbed = true;
-    b->tx = b->px;
-    b->ty = b->py;
+    b->gax = ax;
+    b->gay = ay;
+    b->gmove = move;
+    b->grot = rotate;
+    // initial target = the grab point's current world position
+    const float c = cosf(b->theta), sn = sinf(b->theta);
+    b->tx = b->px + c * ax - sn * ay;
+    b->ty = b->py + sn * ax + c * ay;
 }
 
 void phys_grab_move(int body, float x, float y) {

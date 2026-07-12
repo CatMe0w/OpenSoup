@@ -24,7 +24,10 @@ bool rbh_eval(const char* code, const char* what);
 // the scene sprite id (or -1). Unset = headless, sprites skipped.
 typedef int (*rbh_sprite_fn)(const char* image, int body, float com_x,
                              float com_y, int group, void* user);
-void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user);
+// called on toy teardown for each scene sprite the toy created
+typedef void (*rbh_sprite_remove_fn)(int sprite, void* user);
+void rbh_set_sprite_hook(rbh_sprite_fn fn, rbh_sprite_remove_fn remove_fn,
+                         void* user);
 
 // Instantiate a toy through the Ruby framework: ToyClassResolver resolves
 // class_name (loading class_dir/<name>.rb if the toy has a script), then
@@ -32,6 +35,10 @@ void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user);
 // which realizes physics bodies/joints and fires the sprite hook.
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m);
+
+// resolve (and load, if the toy has a script) a toy class without
+// instantiating it - for classes other toys reference (Goose -> GooseEgg)
+bool rbh_load_toy_class(const char* class_name, const char* class_dir);
 
 // Per-frame heartbeat: accumulates dt into fixed 0.01s steps and drives
 // $default_engine.run_steps + dispatch_timers through the framework.
@@ -44,6 +51,7 @@ void rbh_mouse_down(int sprite, double x_px, double y_px, int button);
 void rbh_mouse_move(int sprite, double x_px, double y_px, int button,
                     bool down);
 void rbh_mouse_up(int sprite, double x_px, double y_px, int button);
+void rbh_mouse_click(int sprite, double x_px, double y_px, int button);
 
 // Report the view size in device pixels. Fires $core.screen_size_changed;
 // engines with fit_to_screen re-derive canvas/scene rects, which lands in
