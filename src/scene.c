@@ -36,9 +36,7 @@ static struct {
     int nsprites;
     int grabbed;        // sprite index or -1
     float grab_off[2];
-    double phys_acc_ms; // fixed-step accumulator
     float view_h;       // device px, for world<->view y flip
-    bool world_ready;
 } state;
 
 // world (meters, y-up, origin bottom-left) <-> view (device px, y-down)
@@ -179,21 +177,9 @@ void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y
 }
 
 void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
-    // world extents follow the screen (fit_scene_to_canvas: screen/scale)
+    // physics stepping and world extents now live in the Ruby heartbeat
+    // (rbh_frame / rbh_screen_size); the scene only renders and hit-tests
     state.view_h = (float)swapchain->height;
-    if (!state.world_ready) {
-        phys_set_world((float)swapchain->width / PHYS_PX_PER_UNIT,
-                       (float)swapchain->height / PHYS_PX_PER_UNIT);
-        state.world_ready = true;
-    }
-
-    // fixed-timestep accumulator, original cadence: 0.01s per step
-    state.phys_acc_ms += dt_ms;
-    const int nsteps = (int)(state.phys_acc_ms / (PHYS_DT * 1000.0));
-    if (nsteps > 0) {
-        state.phys_acc_ms -= nsteps * (PHYS_DT * 1000.0);
-        phys_steps(nsteps > 25 ? 25 : nsteps); // clamp long stalls
-    }
     for (int i = 0; i < state.nsprites; i++) {
         sprite_t* s = &state.sprites[i];
         if (s->body >= 0) { // grabbed sprites follow too: the spring moves them

@@ -70,6 +70,7 @@ typedef struct {
 
 typedef struct {
     const char* class_name;
+    const char* root; // container dir under the assets root (toy scripts live there)
     float base_scale;
     int nlimbs;
     td_limb* limbs;

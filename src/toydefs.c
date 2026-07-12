@@ -169,6 +169,7 @@ bool toydefs_load(const char* json_path) {
         }
         toydef_t* d = &defs[ndefs++];
         d->class_name = strdup(toy->string);
+        d->root = dupstr(toy, "root");
         d->base_scale = num(toy, "baseScale", 1.0f);
         d->nlimbs = nlimbs;
         d->limbs = calloc((size_t)nlimbs, sizeof(td_limb));

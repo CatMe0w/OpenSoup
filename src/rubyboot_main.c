@@ -17,17 +17,17 @@ int main(int argc, char** argv) {
     snprintf(path, sizeof path, "%s/souptoys_core_toy", assets);
     bool ok = rbh_boot(path);
 
-    // Milestone: World toy exists per engine, walls follow the scene rect
-    // (REngine#core_loaded ran World.new; setting the scene fires
-    // scene_walls_changed -> World#walls_changed -> Limb#position=).
+    // Milestone: World toy exists per engine and the walls follow the screen
+    // through the whole framework chain: screen_size_changed ->
+    // fit_canvas_to_screen/fit_scene_to_canvas -> scene_walls_changed ->
+    // World#walls_changed -> Limb#position=.
     if (ok) {
+        rbh_screen_size(1280.0, 800.0);
         ok = rbh_eval(
             "w = $default_engine.toys.by_sid(:world)\n"
             "raise 'world toy missing' unless w\n"
             "raise 'not a World' unless w.is_a?(World)\n"
             "raise 'not sticky' unless w.is_sticky?\n"
-            "$default_engine.scene_bottom_left = Vector[0.0, 0.0]\n"
-            "$default_engine.scene_top_right = Vector[-12.8, -8.0]\n"
             "names = [:left_wall, :right_wall, :floor, :ceiling]\n"
             "ls = names.map {|s| w.limbs.by_sid(s) or raise \"no #{s}\"}\n"
             "STDERR.puts 'rubyboot: world=' + w.toy_instance_id.to_s +\n"
@@ -36,6 +36,19 @@ int main(int argc, char** argv) {
             "raise 'ceiling' unless (ls[3].position.y - 8.0).abs < 1e-6\n"
             "raise 'scale not refit' unless ($default_engine.scale - 100.0).abs < 1e-6\n",
             "world verification");
+    }
+
+    // Physics timers: scheduled ticks delivered through dispatch_timers,
+    // registered via the framework's SoupNode#on_timer.
+    if (ok) {
+        ok = rbh_eval(
+            "$fired = []\n"
+            "w = $default_engine.toys.by_sid(:world)\n"
+            "w.on_timer(lambda {|t| $fired << t}, 50)\n"
+            "$default_engine.run_steps(100)\n"
+            "$default_engine.dispatch_timers(100)\n"
+            "raise \"timer fired #{$fired.inspect}\" unless $fired == [50, 100]\n",
+            "timer verification");
     }
 
     // Ruby-path toy instantiation: bluebear (no script -> resolver creates a

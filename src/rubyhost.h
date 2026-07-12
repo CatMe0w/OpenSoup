@@ -33,4 +33,13 @@ void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user);
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m);
 
+// Per-frame heartbeat: accumulates dt into fixed 0.01s steps and drives
+// $default_engine.run_steps + dispatch_timers through the framework.
+void rbh_frame(double dt_ms);
+
+// Report the view size in device pixels. Fires $core.screen_size_changed;
+// engines with fit_to_screen re-derive canvas/scene rects, which lands in
+// phys_set_world via the scene_walls_changed chain.
+void rbh_screen_size(double w_px, double h_px);
+
 void rbh_shutdown(void);

@@ -72,7 +72,8 @@ static void to_px(NSPoint p, float* x, float* y) {
 @end
 @implementation OverlayViewDelegate
 - (void)mtkView:(nonnull MTKView*)v drawableSizeWillChange:(CGSize)size {
-    (void)v; (void)size;
+    (void)v;
+    rbh_screen_size(size.width, size.height);
 }
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
@@ -88,6 +89,7 @@ static void to_px(NSPoint p, float* x, float* y) {
         const CFTimeInterval now = CACurrentMediaTime();
         const double dt_ms = last_frame_time > 0 ? (now - last_frame_time) * 1000.0 : 16.7;
         last_frame_time = now;
+        rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
 
         const sg_swapchain swapchain = {
             .width = (int)v.drawableSize.width,
@@ -147,6 +149,9 @@ static void to_px(NSPoint p, float* x, float* y) {
         },
     };
     scene_setup(&env);
+
+    // world extents must be known before toys spawn
+    rbh_screen_size(view.drawableSize.width, view.drawableSize.height);
 
     const int n = demo_load(assets_root);
     NSLog(@"OpenSoup MVP up: %d sprites from %s; drag them, empty space clicks through, Esc quits", n, assets_root);

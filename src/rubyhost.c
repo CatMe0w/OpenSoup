@@ -7,6 +7,7 @@
 #include "physics.h"
 #include "toydefs.h"
 #include "toyphys.h"
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,8 @@ typedef struct {
     int body;               // SN_LIMB: phys body index, -1 = not realized
     double px, py, orient, shock;
     VALUE inputs;           // SN_ENGINE
+    VALUE timers;           // SN_ENGINE: [[proc, period_ticks, next_tick]...]
+    double timer_tick;      // SN_ENGINE: dispatch_timers position, 1/100 s
     double scene_bl[2], scene_tr[2], canvas_tl[2], canvas_br[2];
     double scale, gravity, timestep, timescale, time;
     int paused;
@@ -77,6 +80,7 @@ static void sn_gcmark(void* p) {
         rb_gc_mark(n->colls[i]);
     }
     rb_gc_mark(n->inputs);
+    rb_gc_mark(n->timers);
     rb_gc_mark(n->engines);
     rb_gc_mark(n->license_policy);
     rb_gc_mark(n->load_paths);
@@ -99,7 +103,7 @@ static VALUE sn_wrap(VALUE klass, int kind) {
     n->kind = kind;
     n->sid = n->parent = n->engine = Qnil;
     n->items = n->inputs = n->engines = Qnil;
-    n->ref1 = n->ref2 = Qnil;
+    n->ref1 = n->ref2 = n->timers = Qnil;
     n->license_policy = n->load_paths = Qnil;
     n->body = -1;
     for (int i = 0; i < SN_NCOLLS; i++) {
@@ -353,6 +357,7 @@ static VALUE alloc_engine(VALUE klass) {
     VALUE v = sn_wrap(klass, SN_ENGINE);
     sn_t* n = sn_get(v);
     n->inputs = rb_ary_new();
+    n->timers = rb_ary_new();
     n->colls[0] = coll_new_named("ToyContainer", v, v);
     return v;
 }
@@ -568,9 +573,18 @@ static VALUE eng_scene_bl(VALUE self) {
     return vec_new(n->scene_bl[0], n->scene_bl[1]);
 }
 
+// All rect/scale setters are change-gated, like the original's: firing the
+// framework callbacks on a no-op write would run fit_* on half-updated
+// rects (scale blows up to Infinity) and can recurse.
 static VALUE eng_scene_bl_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
-    vec_get(v, &n->scene_bl[0], &n->scene_bl[1]);
+    double x, y;
+    vec_get(v, &x, &y);
+    if (x == n->scene_bl[0] && y == n->scene_bl[1]) {
+        return v;
+    }
+    n->scene_bl[0] = x;
+    n->scene_bl[1] = y;
     eng_sync_phys_walls(n, self);
     rb_funcall(self, rb_intern("scene_walls_changed"), 0);
     return v;
@@ -583,7 +597,13 @@ static VALUE eng_scene_tr(VALUE self) {
 
 static VALUE eng_scene_tr_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
-    vec_get(v, &n->scene_tr[0], &n->scene_tr[1]);
+    double x, y;
+    vec_get(v, &x, &y);
+    if (x == n->scene_tr[0] && y == n->scene_tr[1]) {
+        return v;
+    }
+    n->scene_tr[0] = x;
+    n->scene_tr[1] = y;
     eng_sync_phys_walls(n, self);
     rb_funcall(self, rb_intern("scene_walls_changed"), 0);
     return v;
@@ -596,7 +616,13 @@ static VALUE eng_canvas_tl(VALUE self) {
 
 static VALUE eng_canvas_tl_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
-    vec_get(v, &n->canvas_tl[0], &n->canvas_tl[1]);
+    double x, y;
+    vec_get(v, &x, &y);
+    if (x == n->canvas_tl[0] && y == n->canvas_tl[1]) {
+        return v;
+    }
+    n->canvas_tl[0] = x;
+    n->canvas_tl[1] = y;
     rb_funcall(self, rb_intern("canvas_changed"), 0);
     return v;
 }
@@ -608,7 +634,13 @@ static VALUE eng_canvas_br(VALUE self) {
 
 static VALUE eng_canvas_br_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
-    vec_get(v, &n->canvas_br[0], &n->canvas_br[1]);
+    double x, y;
+    vec_get(v, &x, &y);
+    if (x == n->canvas_br[0] && y == n->canvas_br[1]) {
+        return v;
+    }
+    n->canvas_br[0] = x;
+    n->canvas_br[1] = y;
     rb_funcall(self, rb_intern("canvas_changed"), 0);
     return v;
 }
@@ -628,7 +660,12 @@ static VALUE eng_scale(VALUE self) {
 }
 
 static VALUE eng_scale_set(VALUE self, VALUE v) {
-    sn_get(self)->scale = NUM2DBL(v);
+    sn_t* n = sn_get(self);
+    const double f = NUM2DBL(v);
+    if (f == n->scale) {
+        return v;
+    }
+    n->scale = f;
     rb_funcall(self, rb_intern("scale_changed"), 0);
     return v;
 }
@@ -667,6 +704,52 @@ static VALUE eng_run_steps(VALUE self, VALUE n) {
             phys_steps(steps);
         }
         e->time += steps * e->timestep;
+    }
+    return Qnil;
+}
+
+// Physics timers: proc fires every `period` ticks (1/100 s), first at
+// `start` ticks from now; proc.call receives the SCHEDULED tick so the
+// framework's `t % n` patterns hold even when a frame delivers several
+// ticks at once.
+static VALUE eng_add_phys_timer(VALUE self, VALUE proc, VALUE period,
+                                VALUE start) {
+    sn_t* e = sn_get(self);
+    VALUE entry = rb_ary_new3(3, proc, rb_float_new(NUM2DBL(period)),
+                              rb_float_new(e->timer_tick + NUM2DBL(start)));
+    rb_ary_push(e->timers, entry);
+    return proc;
+}
+
+static VALUE eng_remove_phys_timer(VALUE self, VALUE proc) {
+    sn_t* e = sn_get(self);
+    for (long i = RARRAY(e->timers)->len - 1; i >= 0; i--) {
+        VALUE entry = rb_ary_entry(e->timers, i);
+        if (RTEST(rb_equal(rb_ary_entry(entry, 0), proc))) {
+            rb_funcall(e->timers, rb_intern("delete_at"), 1, LONG2NUM(i));
+        }
+    }
+    return proc;
+}
+
+static VALUE eng_dispatch_timers(VALUE self, VALUE delta) {
+    sn_t* e = sn_get(self);
+    if (e->paused) {
+        return Qnil;
+    }
+    e->timer_tick += NUM2DBL(delta);
+    ID id_call = rb_intern("call");
+    // index-walk: procs may add/remove timers from inside call
+    for (long i = 0; i < RARRAY(e->timers)->len; i++) {
+        VALUE entry = rb_ary_entry(e->timers, i);
+        const double period = NUM2DBL(rb_ary_entry(entry, 1));
+        double next = NUM2DBL(rb_ary_entry(entry, 2));
+        while (next <= e->timer_tick) {
+            rb_funcall(rb_ary_entry(entry, 0), id_call, 1,
+                       INT2NUM((long)next));
+            next += period > 0 ? period : e->timer_tick - next + 1;
+            rb_ary_store(entry, 2, rb_float_new(next));
+        }
     }
     return Qnil;
 }
@@ -892,6 +975,9 @@ static void define_real(void) {
     rb_define_method(c, "paused", eng_paused, 0);
     rb_define_method(c, "paused=", eng_paused_set, 1);
     rb_define_method(c, "run_steps", eng_run_steps, 1);
+    rb_define_method(c, "add_phys_timer", eng_add_phys_timer, 3);
+    rb_define_method(c, "remove_phys_timer", eng_remove_phys_timer, 1);
+    rb_define_method(c, "dispatch_timers", eng_dispatch_timers, 1);
 
     c = cls_find("RCore");
     rb_define_method(c, "add_engine", core_add_engine, 1);
@@ -941,6 +1027,65 @@ bool rbh_eval(const char* code, const char* what) {
     return false;
 }
 
+// rb_funcall behind rb_protect: script exceptions (e.g. inside timer procs)
+// must not longjmp through the C frame loop.
+struct fcall {
+    VALUE recv;
+    ID id;
+    int argc;
+    VALUE argv[2];
+};
+
+static VALUE fcall_thunk(VALUE arg) {
+    struct fcall* f = (struct fcall*)arg;
+    return rb_funcall2(f->recv, f->id, f->argc, f->argv);
+}
+
+static bool fcall_protected(VALUE recv, const char* name, int argc,
+                            VALUE a0, const char* what) {
+    struct fcall f = { recv, rb_intern(name), argc, { a0, Qnil } };
+    int state = 0;
+    rb_protect(fcall_thunk, (VALUE)&f, &state);
+    if (state == 0) {
+        return true;
+    }
+    report_exception(what);
+    return false;
+}
+
+// Per-frame heartbeat: fixed 0.01s steps with an accumulator (clamped like
+// the native loop was), driven through the FRAMEWORK's run_steps wrapper so
+// engine_execute and pre-timer observers behave as in the original.
+void rbh_frame(double dt_ms) {
+    static double acc_ms;
+    acc_ms += dt_ms;
+    int steps = (int)(acc_ms / (PHYS_DT * 1000.0));
+    if (steps <= 0) {
+        return;
+    }
+    acc_ms -= steps * (PHYS_DT * 1000.0);
+    if (steps > 25) {
+        steps = 25; // clamp long stalls
+    }
+    VALUE eng = rb_gv_get("$default_engine");
+    if (NIL_P(eng)) {
+        return;
+    }
+    fcall_protected(eng, "run_steps", 1, INT2FIX(steps), "run_steps");
+    fcall_protected(eng, "dispatch_timers", 1, INT2FIX(steps),
+                    "dispatch_timers");
+}
+
+void rbh_screen_size(double w_px, double h_px) {
+    g_screen_w = w_px;
+    g_screen_h = h_px;
+    VALUE core = rb_gv_get("$core");
+    if (!NIL_P(core)) {
+        fcall_protected(core, "screen_size_changed", 0, Qnil,
+                        "screen_size_changed");
+    }
+}
+
 static bool eval_resource(const char* key) {
     char p[1400];
     if (!resource_path(key, p, sizeof p)) {
@@ -984,6 +1129,11 @@ bool rbh_boot(const char* scripts_root) {
 
     ruby_init();
     ruby_script("souptoys_embedded");
+    // Ruby 1.8 traps INT/TERM and turns them into SignalExceptions, which
+    // our rb_protect frames would swallow, and the app becomes unkillable.
+    // The host owns process lifetime, not the interpreter.
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
     Init_ext(); // static stringio + syck (yaml needs both)
     define_api();
     define_real();
