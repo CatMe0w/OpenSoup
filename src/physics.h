@@ -57,6 +57,9 @@ void phys_steps(int n);
 void phys_body_pos(int body, float* x, float* y);
 float phys_body_orientation(int body); // radians, CCW positive, unbounded
 
+// teleport (script-driven placement); momenta are left untouched
+void phys_body_set_pose(int body, float x, float y, float theta);
+
 // spring joint between two bodies, anchors in body-local meters:
 // F = stiffness * (|d| - restLength) * dir - dampener * relative anchor
 // velocity, applied at the anchors (torque from the offset).

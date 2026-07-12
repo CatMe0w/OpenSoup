@@ -31,6 +31,7 @@ if(APPLE)
         src/demo.c
         src/physics.c
         src/toydefs.c
+        src/toyphys.c
         src/rubyhost.c
         vendor/cjson/cJSON.c
         src/macos/main_macos.m
@@ -61,6 +62,7 @@ if(APPLE)
         src/rubyhost.c
         src/physics.c
         src/toydefs.c
+        src/toyphys.c
         vendor/cjson/cJSON.c
     )
     target_include_directories(opensoup_rubyboot PRIVATE

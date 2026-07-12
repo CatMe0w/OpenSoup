@@ -393,6 +393,13 @@ float phys_body_orientation(int body) {
     return P.bodies[body].theta;
 }
 
+void phys_body_set_pose(int body, float x, float y, float theta) {
+    body_t* b = &P.bodies[body];
+    b->px = x;
+    b->py = y;
+    b->theta = theta;
+}
+
 void phys_grab(int body) {
     body_t* b = &P.bodies[body];
     b->grabbed = true;

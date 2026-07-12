@@ -17,4 +17,20 @@ bool rbh_boot(const char* scripts_root);
 // with `what` and returns false.
 bool rbh_eval(const char* code, const char* what);
 
+// Visual bridge: called once per limb sprite (back-to-front by zOrder) when a
+// toy is realized into the default engine. image is the def's path relative
+// to the assets root; (com_x, com_y) is objectCentreOfMass in sprite pixels,
+// y-up; group is the toy instance id (sprites of one toy share it). Return
+// the scene sprite id (or -1). Unset = headless, sprites skipped.
+typedef int (*rbh_sprite_fn)(const char* image, int body, float com_x,
+                             float com_y, int group, void* user);
+void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user);
+
+// Instantiate a toy through the Ruby framework: ToyClassResolver resolves
+// class_name (loading class_dir/<name>.rb if the toy has a script), then
+// .new -> move to (x_m, y_m) world meters -> $default_engine.toys << toy,
+// which realizes physics bodies/joints and fires the sprite hook.
+bool rbh_spawn_toy(const char* class_name, const char* class_dir,
+                   double x_m, double y_m);
+
 void rbh_shutdown(void);

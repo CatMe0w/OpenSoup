@@ -6,6 +6,7 @@
 #include "rubyhost.h"
 #include "physics.h"
 #include "toydefs.h"
+#include "toyphys.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,10 +44,16 @@ typedef struct {
     VALUE sid, parent, engine;
     VALUE items;            // SN_COLL
     VALUE colls[SN_NCOLLS];
+    VALUE ref1, ref2;       // joint: limb1/limb2
     const toydef_t* def;    // SN_TOY
     int instance_id;        // SN_TOY
     int sticky;             // SN_TOY
+    int realized;           // SN_TOY: phys bodies/joints exist
     const td_limb* ldef;    // SN_LIMB
+    const td_sprite* spdef; // sprite node
+    const td_shape* shdef;  // shape node
+    const td_joint* jdef;   // joint node
+    int body;               // SN_LIMB: phys body index, -1 = not realized
     double px, py, orient, shock;
     VALUE inputs;           // SN_ENGINE
     double scene_bl[2], scene_tr[2], canvas_tl[2], canvas_br[2];
@@ -64,6 +71,8 @@ static void sn_gcmark(void* p) {
     rb_gc_mark(n->parent);
     rb_gc_mark(n->engine);
     rb_gc_mark(n->items);
+    rb_gc_mark(n->ref1);
+    rb_gc_mark(n->ref2);
     for (int i = 0; i < SN_NCOLLS; i++) {
         rb_gc_mark(n->colls[i]);
     }
@@ -90,7 +99,9 @@ static VALUE sn_wrap(VALUE klass, int kind) {
     n->kind = kind;
     n->sid = n->parent = n->engine = Qnil;
     n->items = n->inputs = n->engines = Qnil;
+    n->ref1 = n->ref2 = Qnil;
     n->license_policy = n->load_paths = Qnil;
+    n->body = -1;
     for (int i = 0; i < SN_NCOLLS; i++) {
         n->colls[i] = Qnil;
     }
@@ -114,7 +125,89 @@ static void vec_get(VALUE v, double* x, double* y) {
     *y = NUM2DBL(rb_funcall(v, idx, 1, INT2FIX(1)));
 }
 
-// engine (re)parenting
+// realization + engine (re)parenting
+
+static rbh_sprite_fn g_sprite_fn;
+static void* g_sprite_user;
+
+void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user) {
+    g_sprite_fn = fn;
+    g_sprite_user = user;
+}
+
+// Entering the default engine makes a toy physical: one phys body per limb
+// (at the limb's CURRENT position, so pre-add Toy#move works), the def's
+// spring joints, and the visuals via the app's sprite hook, back-to-front
+// by zOrder (smaller = nearer the viewer). No teardown yet: bodies outlive
+// removal until phys grows a free list.
+static void toy_realize(VALUE toyv) {
+    sn_t* t = sn_get(toyv);
+    if (t->realized || !t->def) {
+        return;
+    }
+    t->realized = 1;
+    const float S = (float)t->def->base_scale;
+
+    VALUE limbs = sn_get(t->colls[1])->items;
+    for (long i = 0; i < RARRAY(limbs)->len; i++) {
+        sn_t* ln = sn_get(rb_ary_entry(limbs, i));
+        if (ln->body < 0 && ln->ldef) {
+            ln->body = toyphys_body_for_limb(ln->ldef, (float)ln->px,
+                                             (float)ln->py,
+                                             (float)ln->orient, S);
+        }
+    }
+
+    VALUE joints = sn_get(t->colls[2])->items;
+    for (long i = 0; i < RARRAY(joints)->len; i++) {
+        sn_t* jn = sn_get(rb_ary_entry(joints, i));
+        const td_joint* j = jn->jdef;
+        if (!j || NIL_P(jn->ref1) || NIL_P(jn->ref2)) {
+            continue;
+        }
+        const int b1 = sn_get(jn->ref1)->body;
+        const int b2 = sn_get(jn->ref2)->body;
+        if (b1 < 0 || b2 < 0) {
+            continue;
+        }
+        phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
+                       b2, j->anchor2[0] * S, j->anchor2[1] * S,
+                       j->rest_length * S, j->stiffness, j->dampener);
+    }
+
+    if (!g_sprite_fn) {
+        return; // headless: physics only
+    }
+    struct { const td_sprite* sp; int body; } vis[128];
+    int nvis = 0;
+    for (long i = 0; i < RARRAY(limbs)->len && nvis < 128; i++) {
+        sn_t* ln = sn_get(rb_ary_entry(limbs, i));
+        VALUE sprites = sn_get(ln->colls[0])->items;
+        for (long s = 0; s < RARRAY(sprites)->len && nvis < 128; s++) {
+            const td_sprite* sp = sn_get(rb_ary_entry(sprites, s))->spdef;
+            if (sp && sp->image) {
+                vis[nvis].sp = sp;
+                vis[nvis].body = ln->body;
+                nvis++;
+            }
+        }
+    }
+    for (int a = 1; a < nvis; a++) { // insertion sort, zOrder descending
+        const td_sprite* sp = vis[a].sp;
+        const int body = vis[a].body;
+        int b = a;
+        while (b > 0 && vis[b - 1].sp->z_order < sp->z_order) {
+            vis[b] = vis[b - 1];
+            b--;
+        }
+        vis[b].sp = sp;
+        vis[b].body = body;
+    }
+    for (int i = 0; i < nvis; i++) {
+        g_sprite_fn(vis[i].sp->image, vis[i].body, vis[i].sp->com[0],
+                    vis[i].sp->com[1], t->instance_id, g_sprite_user);
+    }
+}
 
 // Setting a node's engine recurses into children, then fires the
 // SoupNode#engine_changed(old, new) callback the framework relies on to
@@ -135,6 +228,10 @@ static void sn_set_engine(VALUE nodev, VALUE eng) {
         if (!NIL_P(n->colls[i])) {
             sn_set_engine(n->colls[i], eng);
         }
+    }
+    if (n->kind == SN_TOY && !NIL_P(eng)
+        && eng == rb_gv_get("$default_engine")) {
+        toy_realize(nodev);
     }
     rb_funcall(nodev, rb_intern("engine_changed"), 2, old, eng);
 }
@@ -187,6 +284,18 @@ static VALUE alloc_limb_at(const td_limb* l, double base_scale) {
         n->px = l->rest_pos[0] * base_scale;
         n->py = l->rest_pos[1] * base_scale;
         n->orient = l->rest_orient;
+        for (int i = 0; i < l->nsprites; i++) {
+            VALUE sp = sn_wrap(cls_find("Sprite"), SN_GENERIC);
+            sn_get(sp)->spdef = &l->sprites[i];
+            sn_get(sp)->parent = n->colls[0];
+            rb_ary_push(sn_get(n->colls[0])->items, sp);
+        }
+        for (int i = 0; i < l->nshapes; i++) {
+            VALUE sh = sn_wrap(cls_find("Shape"), SN_GENERIC);
+            sn_get(sh)->shdef = &l->shapes[i];
+            sn_get(sh)->parent = n->colls[1];
+            rb_ary_push(sn_get(n->colls[1])->items, sh);
+        }
     }
     return v;
 }
@@ -220,7 +329,22 @@ static VALUE alloc_toy(VALUE klass) {
             sn_get(lv)->parent = n->colls[1];
             rb_ary_push(limbs->items, lv);
         }
-        // TODO(step2): joints, sprites, shapes, motors, sounds
+        sn_t* joints = sn_get(n->colls[2]);
+        for (int i = 0; i < n->def->njoints; i++) {
+            const td_joint* j = &n->def->joints[i];
+            VALUE jv = sn_wrap(cls_find("Joint"), SN_GENERIC);
+            sn_t* jn = sn_get(jv);
+            jn->jdef = j;
+            jn->parent = n->colls[2];
+            if (j->limb1 >= 0) {
+                jn->ref1 = rb_ary_entry(limbs->items, j->limb1);
+            }
+            if (j->limb2 >= 0) {
+                jn->ref2 = rb_ary_entry(limbs->items, j->limb2);
+            }
+            rb_ary_push(joints->items, jv);
+        }
+        // TODO: rotational joints, motors, sounds (defs not consumed yet)
     }
     return self;
 }
@@ -342,23 +466,44 @@ static VALUE limb_shapes(VALUE self) { return sn_get(self)->colls[1]; }
 static VALUE limb_lmotors(VALUE self) { return sn_get(self)->colls[2]; }
 static VALUE limb_rmotors(VALUE self) { return sn_get(self)->colls[3]; }
 
+// Once realized, the phys body owns the kinematic truth; the stored fields
+// only cover the pre-realization window (construction, pre-add Toy#move).
 static VALUE limb_position(VALUE self) {
     sn_t* n = sn_get(self);
+    if (n->body >= 0) {
+        float x, y;
+        phys_body_pos(n->body, &x, &y);
+        return vec_new(x, y);
+    }
     return vec_new(n->px, n->py);
 }
 
 static VALUE limb_position_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
     vec_get(v, &n->px, &n->py);
+    if (n->body >= 0) {
+        phys_body_set_pose(n->body, (float)n->px, (float)n->py,
+                           phys_body_orientation(n->body));
+    }
     return v;
 }
 
 static VALUE limb_orientation(VALUE self) {
-    return rb_float_new(sn_get(self)->orient);
+    sn_t* n = sn_get(self);
+    if (n->body >= 0) {
+        return rb_float_new(phys_body_orientation(n->body));
+    }
+    return rb_float_new(n->orient);
 }
 
 static VALUE limb_orientation_set(VALUE self, VALUE v) {
-    sn_get(self)->orient = NUM2DBL(v);
+    sn_t* n = sn_get(self);
+    n->orient = NUM2DBL(v);
+    if (n->body >= 0) {
+        float x, y;
+        phys_body_pos(n->body, &x, &y);
+        phys_body_set_pose(n->body, x, y, (float)n->orient);
+    }
     return v;
 }
 
@@ -887,6 +1032,17 @@ bool rbh_boot(const char* scripts_root) {
         return false;
     }
     return true;
+}
+
+bool rbh_spawn_toy(const char* class_name, const char* class_dir,
+                   double x_m, double y_m) {
+    char code[1024];
+    snprintf(code, sizeof code,
+             "t = ToyClassResolver.load_toy_class('%s', Pathname.new('%s')).new\n"
+             "t.move(Vector[%.6f, %.6f])\n"
+             "$default_engine.toys << t\n",
+             class_name, class_dir ? class_dir : ".", x_m, y_m);
+    return rbh_eval(code, class_name);
 }
 
 void rbh_shutdown(void) {

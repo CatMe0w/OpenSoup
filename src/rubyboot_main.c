@@ -38,6 +38,35 @@ int main(int argc, char** argv) {
             "world verification");
     }
 
+    // Ruby-path toy instantiation: bluebear (no script -> resolver creates a
+    // bare Toy subclass), realized into physics on toys <<, then settles
+    // under gravity without the joints blowing up.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        ok = rbh_spawn_toy("U6Bluebear", dir, 6.0, 5.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "t = $default_engine.toys.by_index(1)\n"
+            "raise 'bear missing' unless t and t.toy_id == 'U6Bluebear'\n"
+            "raise 'limbs' unless t.limbs.count == 6\n"
+            "raise 'joints' unless t.joints.count == 11\n"
+            "head = t.limbs.by_sid(:Head)\n"
+            "raise 'no Head limb' unless head\n"
+            "y0 = head.position.y\n"
+            "$default_engine.run_steps(300)\n"
+            "y1 = head.position.y\n"
+            "STDERR.puts format('rubyboot: bear head %.3f -> %.3f after 3s', y0, y1)\n"
+            "raise 'did not fall' unless y1 < y0\n"
+            "t.limbs.each do |l|\n"
+            "  p = l.position\n"
+            "  raise 'limb escaped' unless p.x.finite? and p.y.finite?\n"
+            "  raise 'below floor' if p.y < -1.0\n"
+            "end\n",
+            "bluebear verification");
+    }
+
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");
     rbh_shutdown();
     return ok ? 0 : 1;

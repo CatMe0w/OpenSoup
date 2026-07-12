@@ -5,14 +5,15 @@
 #include "demo.h"
 #include "assets.h"
 #include "physics.h"
+#include "rubyhost.h"
 #include "scene.h"
 #include "toydefs.h"
+#include "toyphys.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MAX_LIMBS 64
-#define MAX_SHAPE_PTS 160
 
 static char* join(const char* root, const char* rel) {
     const size_t n = strlen(root) + strlen(rel) + 2;
@@ -41,41 +42,11 @@ static char* alpha_variant(const char* color_path) {
     return p;
 }
 
-// One physics body per limb: collision points from the def's colliding
-// shapes, everything scaled from toy-local units into world meters.
+// One physics body per limb (shared def->phys mapping lives in toyphys.c)
 static int make_limb_body(const td_limb* l, float wx, float wy, float scale) {
-    phys_point pts[MAX_SHAPE_PTS];
-    int npts = 0;
-    for (int s = 0; s < l->nshapes; s++) {
-        const td_shape* sh = &l->shapes[s];
-        if (!sh->collides) {
-            continue; // grab-only shapes don't collide
-        }
-        for (int p = 0; p < sh->npoints && npts < MAX_SHAPE_PTS; p++) {
-            pts[npts++] = (phys_point){ sh->points[p].x * scale,
-                                        sh->points[p].y * scale,
-                                        sh->points[p].r * scale,
-                                        sh->wall_repel, sh->wall_rotate };
-        }
-    }
-    phys_params prm = {
-        .mass = l->mass,
-        .inertia = l->inertia * scale * scale, // def inertia is toy-local units^2
-        .gravity = l->has_gravity_override ? l->gravity_override : PHYS_GRAVITY,
-        .mouse_stiffness = l->mouse_stiffness,
-        .mouse_dampener = l->mouse_dampener,
-        .air_linear = l->air_resistance_linear,
-        .air_angular = l->air_resistance_angular,
-        .anchored = l->fixed_move,
-        .fixed_rotate = l->fixed_rotate,
-        .motor_force = { l->motor_force[0], l->motor_force[1] },
-        .motor_torque = l->motor_torque,
-    };
-    for (int m = 0; m < 5; m++) {
-        prm.material[m] = l->material[m];
-    }
-    return phys_body_add(wx + l->rest_pos[0] * scale, wy + l->rest_pos[1] * scale,
-                         l->rest_orient, &prm, pts, npts, 0.25f);
+    return toyphys_body_for_limb(l, wx + l->rest_pos[0] * scale,
+                                 wy + l->rest_pos[1] * scale,
+                                 l->rest_orient, scale);
 }
 
 // Assemble one toy instance at (x_px, y_world): bodies for every limb,
@@ -151,6 +122,30 @@ static bool spawn_toy(const char* assets_root, const char* class_name,
     return shown > 0;
 }
 
+// Visual half of Ruby-side toy realization: load the sprite's FLC and hand
+// it to the scene, same as the native path below. group = toy instance id,
+// offset past the native demo groups.
+static int ruby_sprite_hook(const char* image, int body, float com_x,
+                            float com_y, int group, void* user) {
+    const char* assets_root = user;
+    char* cpath = join(assets_root, image);
+    char* apath = alpha_variant(cpath);
+    int sprite = -1;
+    // leaked on purpose: scene borrows the pixel buffers for hit-testing
+    as_anim* anim = calloc(1, sizeof(as_anim));
+    if (as_load_flc(cpath, apath, anim)) {
+        sprite = scene_sprite_add(anim->w, anim->h, anim->frame_count,
+                                  anim->frames, anim->speed_ms,
+                                  0, 0, 1000 + group);
+        scene_sprite_bind_body(sprite, body, com_x, com_y);
+    } else {
+        fprintf(stderr, "demo: FAILED %s\n", cpath);
+    }
+    free(cpath);
+    free(apath);
+    return sprite;
+}
+
 int demo_load(const char* assets_root) {
     char* defs = join(assets_root, "toydefs.json");
     if (toydefs_load(defs)) {
@@ -169,7 +164,15 @@ int demo_load(const char* assets_root) {
     n += spawn_toy(assets_root, "U1Bouncy", 600, 6.0f, n);
     // balloon: 7 limbs (balloon + string chain), POSITIVE gravity override
     n += spawn_toy(assets_root, "BalloonBlue", 900, 5.0f, n);
-    // the bear: 6 limbs, 11 spring joints, the full-assembly milestone
-    n += spawn_toy(assets_root, "U6Bluebear", 1200, 5.0f, n);
+
+    // the bear goes through the Ruby framework now: ToyClassResolver ->
+    // Toy.new -> toys <<, realized into the same physics + scene
+    rbh_set_sprite_hook(ruby_sprite_hook, (void*)assets_root);
+    char* dir = join(assets_root, "toys_toybox_toy");
+    if (rbh_spawn_toy("U6Bluebear", dir, 12.0, 5.0)) {
+        printf("demo: U6Bluebear spawned via Ruby\n");
+        n += 1;
+    }
+    free(dir);
     return n;
 }
