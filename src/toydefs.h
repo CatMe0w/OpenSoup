@@ -18,17 +18,15 @@ typedef struct {
 
 typedef struct {
     char* sid;     // scripts address shapes via shapes.by_sid(:sid)
-    bool collides; // memberOf non-empty: participates in collision
     bool grab;     // mouse-interaction shape
-    // per-wall permission bits (PHYS_WALL_*) from the memberOf groups
-    // <wall>_repel (linear impulse) / <wall>_rotate (angular impulse)
-    unsigned char wall_repel;
-    unsigned char wall_rotate;
+    int nmembers;
+    char** members; // memberOf symbols, retained for collision + Ruby events
     int npoints;
     td_point* points; // toy-local units
 } td_shape;
 
 typedef struct {
+    char* sid;   // scripts address sprites via sprites.by_sid(:sid)
     char* image; // resolved color-FLC path relative to the assets root
     int num_frames;
     float com[2]; // objectCentreOfMass: body origin -> visual centre, px, y-up
@@ -51,6 +49,7 @@ typedef struct {
     bool fixed_rotate;
     bool default_grab_move;
     bool default_grab_rotate;
+    char* local_collision_group; // only filters equal groups within one toy
     // material: velocityResponse, stiffness, dampener, kineticFriction, staticFriction
     float material[5];
     float motor_force[2]; // summed linearMotors, limb-local

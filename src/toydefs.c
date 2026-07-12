@@ -27,6 +27,7 @@ static char* dupstr(const cJSON* obj, const char* key) {
 
 static void parse_limb(td_limb* l, const cJSON* limb) {
     l->name = dupstr(limb, "name");
+    l->local_collision_group = dupstr(limb, "localCollisionGroup");
     const cJSON* bs = cJSON_GetObjectItemCaseSensitive(limb, "bodyState");
     l->rest_pos[0] = idx(bs, 0, 0.0f);
     l->rest_pos[1] = idx(bs, 1, 0.0f);
@@ -60,25 +61,18 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
         td_shape* s = &l->shapes[si++];
         s->sid = dupstr(shape, "sid");
         const cJSON* member = cJSON_GetObjectItemCaseSensitive(shape, "memberOf");
-        s->collides = cJSON_GetArraySize(member) > 0;
-        static const char* walls[4] = { "left_wall", "right_wall", "floor", "ceiling" };
+        s->nmembers = cJSON_GetArraySize(member);
+        s->members = calloc((size_t)s->nmembers ? (size_t)s->nmembers : 1,
+                            sizeof(char*));
         const cJSON* g;
+        int gi = 0;
         cJSON_ArrayForEach(g, member) {
             if (!cJSON_IsString(g)) {
                 continue;
             }
-            for (int w = 0; w < 4; w++) {
-                const size_t n = strlen(walls[w]);
-                if (strncmp(g->valuestring, walls[w], n) != 0) {
-                    continue;
-                }
-                if (strcmp(g->valuestring + n, "_repel") == 0) {
-                    s->wall_repel |= (unsigned char)(1 << w);
-                } else if (strcmp(g->valuestring + n, "_rotate") == 0) {
-                    s->wall_rotate |= (unsigned char)(1 << w);
-                }
-            }
+            s->members[gi++] = strdup(g->valuestring);
         }
+        s->nmembers = gi;
         s->grab = num(shape, "grab", 0) != 0.0f;
         const cJSON* pts = cJSON_GetObjectItemCaseSensitive(shape, "points");
         s->npoints = cJSON_GetArraySize(pts);
@@ -100,6 +94,7 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
     const cJSON* sp;
     cJSON_ArrayForEach(sp, sprites) {
         td_sprite* d = &l->sprites[pi++];
+        d->sid = dupstr(sp, "sid");
         d->image = dupstr(sp, "image");
         d->num_frames = (int)num(sp, "numFrames", 1);
         const cJSON* com = cJSON_GetObjectItemCaseSensitive(sp, "objectCentreOfMass");

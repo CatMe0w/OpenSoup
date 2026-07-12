@@ -1,15 +1,15 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 // Physics core v1, modeled on the reverse-engineered Toybox engine
 // fixed dt=0.01, gravity=-18, momentum-space state, RK4 position integration,
-// impulse contacts against 4 world walls, spring joints (sub_532800 form).
+// impulse contacts against world walls and other toys, spring joints
+// (sub_532800 form).
 // World space: meters (1 unit = 100 device pixels), origin bottom-left, y-up.
 //
-// v1 scope: bodies carry collision shapes as point sets (x,y,radius in body
-// space - the .toy unified vertex encoding); every point collides with the
-// walls, with torque from the contact-point offset. Toy-vs-toy narrowphase
-// and the exact material-combine rule are still pending.
+// Bodies retain the original shape boundaries and memberOf groups. Narrowphase
+// is the original vertex-vs-edge model over the .toy swept-circle vertices.
 
 #define PHYS_DT 0.01f
 #define PHYS_GRAVITY -18.0f
@@ -24,9 +24,35 @@
 
 typedef struct {
     float x, y, r; // body-local, meters; polygon vertex = r 0, circle = 1 point
-    unsigned char repel;  // bit per wall: contact may apply linear impulse
-    unsigned char rotate; // bit per wall: contact may apply angular impulse
 } phys_point;
+
+// The shipped definitions use only these 19 collision groups. Keeping them as
+// bits makes the original memberOf pair tests explicit and cheap.
+#define PHYS_GROUP_BOUNCERS          (UINT32_C(1) << 0)
+#define PHYS_GROUP_SPINNERS          (UINT32_C(1) << 1)
+#define PHYS_GROUP_BOUNCER_REPELLERS (UINT32_C(1) << 2)
+#define PHYS_GROUP_SPINNER_ROTATORS  (UINT32_C(1) << 3)
+#define PHYS_GROUP_EXCLUSION         (UINT32_C(1) << 4)
+#define PHYS_GROUP_EXCLUSION_REPELLERS (UINT32_C(1) << 5)
+#define PHYS_GROUP_LEFT_WALL         (UINT32_C(1) << 6)
+#define PHYS_GROUP_RIGHT_WALL        (UINT32_C(1) << 7)
+#define PHYS_GROUP_FLOOR             (UINT32_C(1) << 8)
+#define PHYS_GROUP_CEILING           (UINT32_C(1) << 9)
+#define PHYS_GROUP_LEFT_WALL_REPEL   (UINT32_C(1) << 10)
+#define PHYS_GROUP_LEFT_WALL_ROTATE  (UINT32_C(1) << 11)
+#define PHYS_GROUP_RIGHT_WALL_REPEL  (UINT32_C(1) << 12)
+#define PHYS_GROUP_RIGHT_WALL_ROTATE (UINT32_C(1) << 13)
+#define PHYS_GROUP_FLOOR_REPEL       (UINT32_C(1) << 14)
+#define PHYS_GROUP_FLOOR_ROTATE      (UINT32_C(1) << 15)
+#define PHYS_GROUP_CEILING_REPEL     (UINT32_C(1) << 16)
+#define PHYS_GROUP_CEILING_ROTATE    (UINT32_C(1) << 17)
+#define PHYS_GROUP_SNOWBALLS         (UINT32_C(1) << 18)
+
+typedef struct {
+    int first_point;
+    int npoints;
+    uint32_t groups;
+} phys_shape;
 
 typedef struct {
     float mass;
@@ -44,15 +70,23 @@ typedef struct {
     // staticFriction. Contact response uses the body's OWN material only
     // (original combines self+self, then scales by the mass ratio).
     float material[5];
+    int toy_id;              // collision-group filtering is toy-local
+    uint32_t local_group;    // stable hash of localCollisionGroup
 } phys_params;
 
 void phys_set_world(float width, float height); // wall extents, meters
 
-// pts are copied. npts == 0 falls back to a point at the origin with
-// fallback_radius (sprite-derived), so shapeless limbs still collide.
+// Shapes and points are copied. Shape indices remain aligned with the source
+// td_limb so Ruby Shape nodes can query overlap by (body, shape).
 int phys_body_add(float x, float y, float theta, const phys_params* p,
-                  const phys_point* pts, int npts, float fallback_radius);
+                  const phys_point* pts, int npts,
+                  const phys_shape* shapes, int nshapes,
+                  float fallback_radius);
 void phys_steps(int n);
+
+// Final-state geometric overlap, independent of collision response groups.
+// World wall shapes are interpreted as the corresponding infinite planes.
+bool phys_shapes_overlap(int body1, int shape1, int body2, int shape2);
 
 void phys_body_pos(int body, float* x, float* y);
 float phys_body_orientation(int body); // radians, CCW positive, unbounded

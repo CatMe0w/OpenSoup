@@ -54,6 +54,7 @@ typedef struct {
     const td_limb* ldef;    // SN_LIMB
     const td_sprite* spdef; // sprite node
     const td_shape* shdef;  // shape node
+    int shape_index;        // index in the owning limb/physics body
     const td_joint* jdef;   // joint node
     int body;               // SN_LIMB: phys body index, -1 = not realized
     double px, py, orient, shock;
@@ -61,6 +62,7 @@ typedef struct {
     double lscale;          // SN_LIMB: owning toy's base_scale (unit conv)
     VALUE inputs;           // SN_ENGINE
     VALUE timers;           // SN_ENGINE: [[proc, period_ticks, next_tick]...]
+    VALUE overlaps;         // Shape: active [[other_shape, group], ...]
     double timer_tick;      // SN_ENGINE: dispatch_timers position, 1/100 s
     double scene_bl[2], scene_tr[2], canvas_tl[2], canvas_br[2];
     double scale, gravity, timestep, timescale, time;
@@ -84,6 +86,7 @@ static void sn_gcmark(void* p) {
     }
     rb_gc_mark(n->inputs);
     rb_gc_mark(n->timers);
+    rb_gc_mark(n->overlaps);
     rb_gc_mark(n->engines);
     rb_gc_mark(n->license_policy);
     rb_gc_mark(n->load_paths);
@@ -107,8 +110,10 @@ static VALUE sn_wrap(VALUE klass, int kind) {
     n->sid = n->parent = n->engine = Qnil;
     n->items = n->inputs = n->engines = Qnil;
     n->ref1 = n->ref2 = n->timers = Qnil;
+    n->overlaps = Qnil;
     n->license_policy = n->load_paths = Qnil;
     n->body = -1;
+    n->shape_index = -1;
     for (int i = 0; i < SN_NCOLLS; i++) {
         n->colls[i] = Qnil;
     }
@@ -170,7 +175,8 @@ static void toy_realize(VALUE toyv) {
         if (ln->body < 0 && ln->ldef) {
             ln->body = toyphys_body_for_limb(ln->ldef, (float)ln->px,
                                              (float)ln->py,
-                                             (float)ln->orient, S);
+                                             (float)ln->orient, S,
+                                             t->instance_id);
             if (ln->body >= 0 && (ln->mx || ln->my || ln->mL)) {
                 phys_body_set_momentum(ln->body, (float)ln->mx, (float)ln->my,
                                        (float)ln->mL);
@@ -304,6 +310,9 @@ static void sn_set_engine(VALUE nodev, VALUE eng) {
     }
     VALUE old = n->engine;
     n->engine = eng;
+    if (n->shdef && NIL_P(eng)) {
+        n->overlaps = rb_ary_new();
+    }
     if (!NIL_P(n->items)) {
         for (long i = 0; i < RARRAY(n->items)->len; i++) {
             sn_set_engine(rb_ary_entry(n->items, i), eng);
@@ -376,6 +385,9 @@ static VALUE alloc_limb_at(const td_limb* l, double base_scale) {
         for (int i = 0; i < l->nsprites; i++) {
             VALUE sp = sn_wrap(cls_find("Sprite"), SN_GENERIC);
             sn_get(sp)->spdef = &l->sprites[i];
+            if (l->sprites[i].sid && l->sprites[i].sid[0]) {
+                sn_get(sp)->sid = ID2SYM(rb_intern(l->sprites[i].sid));
+            }
             sn_get(sp)->parent = n->colls[0];
             rb_ary_push(sn_get(n->colls[0])->items, sp);
         }
@@ -383,6 +395,13 @@ static VALUE alloc_limb_at(const td_limb* l, double base_scale) {
             VALUE sh = sn_wrap(cls_find("Shape"), SN_GENERIC);
             sn_t* shn = sn_get(sh);
             shn->shdef = &l->shapes[i];
+            shn->shape_index = i;
+            shn->ref2 = rb_ary_new(); // Shape#member_of
+            for (int m = 0; m < l->shapes[i].nmembers; m++) {
+                rb_ary_push(shn->ref2,
+                            ID2SYM(rb_intern(l->shapes[i].members[m])));
+            }
+            shn->overlaps = rb_ary_new();
             if (l->shapes[i].sid && l->shapes[i].sid[0]) {
                 shn->sid = ID2SYM(rb_intern(l->shapes[i].sid));
             }
@@ -940,22 +959,185 @@ static VALUE input_limb(VALUE self) {
     return sn_get(self)->ref1;
 }
 
-// Shape trigger groups: stored only for now; trigger EVENTS arrive with
-// toy-vs-toy collision (not implemented yet)
+// the limb a shape belongs to (shape.parent = ShapeContainer, .parent = limb)
+static VALUE shape_limb(VALUE self) {
+    VALUE coll = sn_get(self)->parent;
+    return NIL_P(coll) ? Qnil : sn_get(coll)->parent;
+}
+
+static bool value_array_has(VALUE ary, VALUE value) {
+    if (TYPE(ary) != T_ARRAY) return false;
+    for (long i = 0; i < RARRAY(ary)->len; i++) {
+        if (RTEST(rb_equal(rb_ary_entry(ary, i), value))) return true;
+    }
+    return false;
+}
+
+static VALUE normalize_groups(VALUE groups) {
+    if (NIL_P(groups)) return rb_ary_new();
+    VALUE source = TYPE(groups) == T_ARRAY ? groups : rb_ary_new3(1, groups);
+    VALUE result = rb_ary_new();
+    const ID id_to_sym = rb_intern("to_sym");
+    for (long i = 0; i < RARRAY(source)->len; i++) {
+        VALUE group = rb_ary_entry(source, i);
+        if (rb_respond_to(group, id_to_sym)) {
+            group = rb_funcall(group, id_to_sym, 0);
+        }
+        if (!value_array_has(result, group)) rb_ary_push(result, group);
+    }
+    return result;
+}
+
+static VALUE shape_member_of(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (NIL_P(n->ref2)) n->ref2 = rb_ary_new();
+    return n->ref2;
+}
+
+static VALUE shape_member_of_set(VALUE self, VALUE groups) {
+    sn_get(self)->ref2 = normalize_groups(groups);
+    return groups;
+}
+
 static VALUE shape_trigger_on(VALUE self) {
     VALUE v = sn_get(self)->ref1;
     return NIL_P(v) ? rb_ary_new() : v;
 }
 
 static VALUE shape_trigger_on_set(VALUE self, VALUE v) {
-    sn_get(self)->ref1 = v;
+    sn_get(self)->ref1 = normalize_groups(v);
     return v;
 }
 
-// the limb a shape belongs to (shape.parent = ShapeContainer, .parent = limb)
-static VALUE shape_limb(VALUE self) {
-    VALUE coll = sn_get(self)->parent;
-    return NIL_P(coll) ? Qnil : sn_get(coll)->parent;
+static VALUE engine_shape_snapshot(VALUE engine) {
+    VALUE result = rb_ary_new();
+    VALUE toys = sn_get(sn_get(engine)->colls[0])->items;
+    for (long ti = 0; ti < RARRAY(toys)->len; ti++) {
+        sn_t* toy = sn_get(rb_ary_entry(toys, ti));
+        VALUE limbs = sn_get(toy->colls[1])->items;
+        for (long li = 0; li < RARRAY(limbs)->len; li++) {
+            sn_t* limb = sn_get(rb_ary_entry(limbs, li));
+            if (limb->body < 0) continue;
+            VALUE shapes = sn_get(limb->colls[1])->items;
+            for (long si = 0; si < RARRAY(shapes)->len; si++) {
+                VALUE shape = rb_ary_entry(shapes, si);
+                if (sn_get(shape)->shape_index >= 0) rb_ary_push(result, shape);
+            }
+        }
+    }
+    return result;
+}
+
+static bool shape_nodes_overlap(VALUE a, VALUE b) {
+    if (a == b) return false;
+    sn_t* as = sn_get(a);
+    sn_t* bs = sn_get(b);
+    VALUE alv = shape_limb(a), blv = shape_limb(b);
+    if (NIL_P(alv) || NIL_P(blv)) return false;
+    sn_t* al = sn_get(alv);
+    sn_t* bl = sn_get(blv);
+    return phys_shapes_overlap(al->body, as->shape_index,
+                               bl->body, bs->shape_index);
+}
+
+static VALUE shape_triggers_overlapping(VALUE self, VALUE groups) {
+    VALUE result = rb_ary_new();
+    sn_t* shape = sn_get(self);
+    if (NIL_P(shape->engine)) return result;
+    VALUE wanted = normalize_groups(groups);
+    VALUE shapes = engine_shape_snapshot(shape->engine);
+    for (long i = 0; i < RARRAY(shapes)->len; i++) {
+        VALUE other = rb_ary_entry(shapes, i);
+        VALUE members = shape_member_of(other);
+        bool matches = false;
+        for (long g = 0; g < RARRAY(wanted)->len; g++) {
+            if (value_array_has(members, rb_ary_entry(wanted, g))) {
+                matches = true;
+                break;
+            }
+        }
+        if (matches && shape_nodes_overlap(self, other)) rb_ary_push(result, other);
+    }
+    return result;
+}
+
+static bool overlap_pair_has(VALUE overlaps, VALUE other, VALUE group) {
+    if (TYPE(overlaps) != T_ARRAY) return false;
+    for (long i = 0; i < RARRAY(overlaps)->len; i++) {
+        VALUE pair = rb_ary_entry(overlaps, i);
+        if (TYPE(pair) == T_ARRAY && RARRAY(pair)->len >= 2
+            && rb_ary_entry(pair, 0) == other
+            && RTEST(rb_equal(rb_ary_entry(pair, 1), group))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void transition_push(VALUE transitions, VALUE trigger,
+                            VALUE other, VALUE group) {
+    rb_ary_push(transitions, rb_ary_new3(3, trigger, other, group));
+}
+
+// Trigger state is sampled after every fixed physics step. Geometry is shared
+// with collision narrowphase, but memberOf response and trigger_on matching are
+// deliberately separate: sensor-only shapes never produce physical impulses.
+static void dispatch_trigger_transitions(VALUE engine) {
+    VALUE shapes = engine_shape_snapshot(engine);
+    VALUE enters = rb_ary_new();
+    VALUE exits = rb_ary_new();
+
+    for (long i = 0; i < RARRAY(shapes)->len; i++) {
+        VALUE trigger = rb_ary_entry(shapes, i);
+        sn_t* ts = sn_get(trigger);
+        VALUE watched = shape_trigger_on(trigger);
+        VALUE current = rb_ary_new();
+        for (long g = 0; g < RARRAY(watched)->len; g++) {
+            VALUE group = rb_ary_entry(watched, g);
+            for (long j = 0; j < RARRAY(shapes)->len; j++) {
+                VALUE other = rb_ary_entry(shapes, j);
+                if (value_array_has(shape_member_of(other), group)
+                    && shape_nodes_overlap(trigger, other)) {
+                    rb_ary_push(current, rb_ary_new3(2, other, group));
+                }
+            }
+        }
+        VALUE old = NIL_P(ts->overlaps) ? rb_ary_new() : ts->overlaps;
+        for (long j = 0; j < RARRAY(current)->len; j++) {
+            VALUE pair = rb_ary_entry(current, j);
+            VALUE other = rb_ary_entry(pair, 0);
+            VALUE group = rb_ary_entry(pair, 1);
+            if (!overlap_pair_has(old, other, group)) {
+                transition_push(enters, trigger, other, group);
+            }
+        }
+        for (long j = 0; j < RARRAY(old)->len; j++) {
+            VALUE pair = rb_ary_entry(old, j);
+            VALUE other = rb_ary_entry(pair, 0);
+            VALUE group = rb_ary_entry(pair, 1);
+            if (!overlap_pair_has(current, other, group)) {
+                transition_push(exits, trigger, other, group);
+            }
+        }
+        ts->overlaps = current;
+    }
+
+    static ID id_enter, id_exit;
+    if (!id_enter) {
+        id_enter = rb_intern("internal_trigger_enter");
+        id_exit = rb_intern("internal_trigger_exit");
+    }
+    VALUE lists[2] = { enters, exits };
+    ID ids[2] = { id_enter, id_exit };
+    for (int kind = 0; kind < 2; kind++) {
+        for (long i = 0; i < RARRAY(lists[kind])->len; i++) {
+            VALUE tr = rb_ary_entry(lists[kind], i);
+            VALUE trigger = rb_ary_entry(tr, 0);
+            if (sn_get(trigger)->engine != engine) continue;
+            rb_funcall(trigger, ids[kind], 3, trigger,
+                       rb_ary_entry(tr, 1), rb_ary_entry(tr, 2));
+        }
+    }
 }
 
 static VALUE eng_scale(VALUE self) {
@@ -1004,9 +1186,14 @@ static VALUE eng_run_steps(VALUE self, VALUE n) {
     const int steps = NUM2INT(n);
     if (!e->paused && steps > 0) {
         if (is_default_engine(self)) {
-            phys_steps(steps);
+            for (int i = 0; i < steps; i++) {
+                phys_steps(1);
+                e->time += e->timestep;
+                dispatch_trigger_transitions(self);
+            }
+        } else {
+            e->time += steps * e->timestep;
         }
-        e->time += steps * e->timestep;
     }
     return Qnil;
 }
@@ -1307,8 +1494,11 @@ static void define_real(void) {
     rb_define_method(c, "limb", input_limb, 0);
 
     c = cls_find("Shape");
+    rb_define_method(c, "member_of", shape_member_of, 0);
+    rb_define_method(c, "member_of=", shape_member_of_set, 1);
     rb_define_method(c, "trigger_on", shape_trigger_on, 0);
     rb_define_method(c, "trigger_on=", shape_trigger_on_set, 1);
+    rb_define_method(c, "triggers_overlapping", shape_triggers_overlapping, 1);
     rb_define_method(c, "limb", shape_limb, 0);
 
     c = cls_find("Souptoys");

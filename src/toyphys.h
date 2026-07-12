@@ -9,4 +9,4 @@
 // position themselves. scale converts toy-local shape points and inertia
 // into world meters. Returns the phys body index (-1 if full).
 int toyphys_body_for_limb(const td_limb* l, float x, float y, float theta,
-                          float scale);
+                          float scale, int toy_id);

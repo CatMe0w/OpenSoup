@@ -51,6 +51,70 @@ int main(int argc, char** argv) {
             "timer verification");
     }
 
+    // Shape-level narrowphase drives both physical toy contacts and sensor
+    // events. Two balls begin overlapped: triggers_overlapping must see the
+    // other Shape, enter/exit must be edge-triggered, and the penalty contact
+    // must push the bodies apart.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        ok = rbh_load_toy_class("U1Bouncy", dir)
+          && rbh_spawn_toy("U1Bouncy", dir, 4.0, 4.0)
+          && rbh_spawn_toy("U1Bouncy", dir, 4.15, 4.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "balls = $default_engine.toys.select {|t| t.toy_id == 'U1Bouncy'}\n"
+            "raise 'two balls missing' unless balls.size == 2\n"
+            "a, b = balls\n"
+            "sa = a.limbs.first.shapes.first\n"
+            "sb = b.limbs.first.shapes.first\n"
+            "raise 'member_of' unless sa.member_of.include?(:bouncers)\n"
+            "raise 'overlap query' unless sa.triggers_overlapping(:bouncers).include?(sb)\n"
+            "$trigger_enters = $trigger_exits = 0\n"
+            "sa.trigger_on = :bouncers\n"
+            "sa.on_trigger_enter(:bouncers, lambda {|e| $trigger_enters += 1 if e.shape2 == sb})\n"
+            "sa.on_trigger_exit(:bouncers, lambda {|e| $trigger_exits += 1 if e.shape2 == sb})\n"
+            "$default_engine.run_steps(1)\n"
+            "raise 'trigger enter' unless $trigger_enters == 1\n"
+            "b.limbs.first.position = Vector[5.0, 4.0]\n"
+            "$default_engine.run_steps(1)\n"
+            "raise 'trigger exit' unless $trigger_exits == 1\n"
+            "la, lb = a.limbs.first, b.limbs.first\n"
+            "la.position = Vector[4.0, 4.0]; lb.position = Vector[4.15, 4.0]\n"
+            "la.momentum = Vector[0.0, 0.0]; lb.momentum = Vector[0.0, 0.0]\n"
+            "d0 = (lb.position.x - la.position.x).abs\n"
+            "$default_engine.run_steps(5)\n"
+            "d1 = (lb.position.x - la.position.x).abs\n"
+            "STDERR.puts format('rubyboot: toy contact separation %.3f -> %.3f', d0, d1)\n"
+            "raise 'toy contact did not separate' unless d1 > d0 + 0.01\n"
+            "balls.each {|t| $default_engine.toys.remove(t)}\n",
+            "toy collision + trigger verification");
+    }
+
+    // Real shipped script integration: SnowballLarge watches :floor and must
+    // replace itself with four SnowballSmall instances on first overlap.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/christmas07_toy", assets);
+        ok = rbh_load_toy_class("SnowballSmall", dir)
+          && rbh_load_toy_class("SnowballLarge", dir);
+        if (ok) ok = rbh_spawn_toy("SnowballLarge", dir, 3.0, 0.03);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "large = $default_engine.toys.find {|t| t.toy_id == 'SnowballLarge'}\n"
+            "raise 'large snowball missing' unless large\n"
+            "before = $default_engine.toys.count\n"
+            "$default_engine.run_steps(1)\n"
+            "smalls = $default_engine.toys.select {|t| t.toy_id == 'SnowballSmall'}\n"
+            "raise 'large snowball did not shatter' if $default_engine.toys.include?(large)\n"
+            "raise \"small snowballs #{smalls.size}\" unless smalls.size == 4\n"
+            "raise 'snowball count' unless $default_engine.toys.count == before + 3\n"
+            "smalls.each {|t| $default_engine.toys.remove(t)}\n",
+            "snowball trigger verification");
+    }
+
     // Ruby-path toy instantiation: bluebear (no script -> resolver creates a
     // bare Toy subclass), realized into physics on toys <<, then settles
     // under gravity without the joints blowing up.
@@ -156,6 +220,39 @@ int main(int argc, char** argv) {
             "raise 'no egg from rocking' unless $default_engine.toys.count > before\n"
             "$default_engine.input_release(body, input, body.position)\n",
             "rotational grab verification");
+    }
+
+    // Shipped polygon sensor integration: a descending Basketball crossing
+    // SCHoop's sensor-only trigger_top rectangle increments the score on exit.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        ok = rbh_load_toy_class("Basketball", dir)
+          && rbh_load_toy_class("SCHoop", dir)
+          && rbh_spawn_toy("SCHoop", dir, 6.0, 2.0);
+        if (ok) {
+            ok = rbh_eval("$default_engine.run_steps(300)",
+                          "hoop settle verification");
+        }
+        if (ok) ok = rbh_spawn_toy("Basketball", dir, 6.0, 2.26);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "hoop = $default_engine.toys.find {|t| t.toy_id == 'SCHoop'}\n"
+            "ball = $default_engine.toys.find {|t| t.toy_id == 'Basketball'}\n"
+            "raise 'hoop setup' unless hoop && ball\n"
+            "bl = ball.limbs.first\n"
+            "bl.momentum = Vector[0.0, -1.0]\n"
+            "$default_engine.run_steps(1)\n"
+            "bl.position = Vector[6.0, 1.0]\n"
+            "bl.momentum = Vector[0.0, -1.0]\n"
+            "$default_engine.run_steps(1)\n"
+            "score = hoop.instance_variable_get(:@score)\n"
+            "STDERR.puts 'rubyboot: hoop score=' + score.to_s\n"
+            "raise 'hoop did not score' unless score == 2\n"
+            "$default_engine.toys.remove(ball)\n"
+            "$default_engine.toys.remove(hoop)\n",
+            "hoop trigger verification");
     }
 
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");
