@@ -7,6 +7,8 @@
 
 #include "scene.h"
 #include "demo.h"
+#include "rubyhost.h"
+#include "toydefs.h"
 
 static NSWindow* window;
 static MTKView* view;
@@ -162,6 +164,23 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc - 1; i++) {
         if (strcmp(argv[i], "--assets") == 0) {
             assets_root = argv[i + 1];
+        }
+    }
+    // Ruby boot from main: 1.8's conservative GC records the stack base at
+    // ruby_init, so init must sit at least as shallow as any later Ruby call.
+    //
+    // Framework-only for now; the native demo still owns the scene.
+    {
+        char p[1024];
+        snprintf(p, sizeof p, "%s/toydefs.json", assets_root);
+        if (!toydefs_load(p)) {
+            fprintf(stderr, "toydefs.json missing at %s\n", p);
+        }
+        snprintf(p, sizeof p, "%s/souptoys_core_toy", assets_root);
+        if (rbh_boot(p)) {
+            NSLog(@"Ruby framework booted");
+        } else {
+            NSLog(@"Ruby framework boot failed, continuing native-only");
         }
     }
     @autoreleasepool {

@@ -132,6 +132,9 @@ static int limb_index(const toydef_t* d, const char* name) {
 }
 
 bool toydefs_load(const char* json_path) {
+    if (ndefs > 0) {
+        return true; // already loaded (main boots Ruby before demo_load)
+    }
     FILE* f = fopen(json_path, "rb");
     if (!f) {
         return false;

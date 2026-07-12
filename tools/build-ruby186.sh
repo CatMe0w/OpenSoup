@@ -19,10 +19,20 @@ if [ -n "$AUTOMAKE_DIR" ]; then
     cp "$AUTOMAKE_DIR/config.guess" "$AUTOMAKE_DIR/config.sub" .
 fi
 
+# static extensions the Toybox framework needs at boot (yaml -> stringio+syck;
+# the original compiled these into the exe). "option nodynamic" skips all
+# other ext/ dirs. Embedders link ext/extinit.o + the ext .a files and call
+# Init_ext() after ruby_init().
+cat > ext/Setup <<'EOF'
+option nodynamic
+stringio
+syck
+EOF
+
 CFLAGS="-g -O2 -std=gnu89 -fcommon \
  -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types \
  -Wno-implicit-int -Wno-deprecated-declarations -Wno-return-type \
- -Wno-int-conversion" ./configure --disable-shared
+ -Wno-int-conversion" ./configure --disable-shared # --with-static-linked-ext
 
-make miniruby libruby-static.a -j"$(nproc)" # link with: -ldl -lobjc
+make -j"$(nproc)" # link with: -ldl -lobjc
 ./miniruby -v
