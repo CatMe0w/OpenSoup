@@ -1,6 +1,7 @@
 // Headless Ruby boot check: framework load through World instantiation,
 // no window. Exits 0 iff the whole boot + wall-position round trip works.
 #include "rubyhost.h"
+#include "audio.h"
 #include "toydefs.h"
 #include <stdio.h>
 
@@ -8,9 +9,39 @@ int main(int argc, char** argv) {
     const char* assets = argc > 1 ? argv[1] : "private/extracted";
     char path[1024];
 
+    if (!audio_init(true)) {
+        fprintf(stderr, "rubyboot: cannot initialize headless audio\n");
+        return 1;
+    }
+
+    // Static Ogg decode + the original mixer's fixed 32-voice capacity.
+    snprintf(path, sizeof path,
+             "%s/toys_toybox_toy/sound/c06 goose/goosehonk.ogg", assets);
+    const int sample = audio_sample_load(path);
+    int channels = 0, sample_rate = 0;
+    uint64_t frames = 0;
+    bool audio_ok = audio_sample_info(sample, &channels, &sample_rate, &frames)
+                 && channels > 0 && sample_rate > 0 && frames > 0;
+    for (int i = 0; audio_ok && i < AUDIO_MAX_VOICES; i++) {
+        audio_ok = audio_play(sample, 1, 0.0f, false);
+    }
+    if (audio_ok && audio_play(sample, 1, 0.0f, false)) {
+        audio_ok = false;
+    }
+    audio_stop_owner(1);
+    if (!audio_ok || audio_active_voices() != 0) {
+        fprintf(stderr, "rubyboot: audio decode/voice-pool verification failed\n");
+        audio_shutdown();
+        return 1;
+    }
+    fprintf(stderr, "rubyboot: audio %dch %dHz, %llu frames, %d voices\n",
+            channels, sample_rate, (unsigned long long)frames,
+            AUDIO_MAX_VOICES);
+
     snprintf(path, sizeof path, "%s/toydefs.json", assets);
     if (!toydefs_load(path)) {
         fprintf(stderr, "rubyboot: cannot load %s\n", path);
+        audio_shutdown();
         return 1;
     }
 
@@ -201,6 +232,45 @@ int main(int argc, char** argv) {
             "goose verification");
     }
 
+    // Ruby Sound bridge: def path, period throttling, looping, and owner stop.
+    if (ok) {
+        ok = rbh_eval(
+            "goose = $default_engine.toys.find {|t| t.toy_id == 'Goose'}\n"
+            "lay = goose.sounds.by_sid(:lay); pop = goose.sounds.by_sid(:pop)\n"
+            "raise 'sound nodes' unless lay && pop\n"
+            "raise 'sound path' unless lay.path == '../sound/c06 goose/goosehonk.ogg'\n"
+            "lay.stop; pop.stop\n"
+            "lay.period_length = 1.0; lay.max_sounds_per_period = 2\n"
+            "raise 'period getter' unless lay.period_length == 1.0\n"
+            "raise 'max getter' unless lay.max_sounds_per_period == 2\n"
+            "3.times { lay.play(0.0) }\n",
+            "sound throttle verification");
+    }
+    if (ok && audio_active_voices() != 2) {
+        fprintf(stderr, "rubyboot: Sound period limit produced %d voices\n",
+                audio_active_voices());
+        ok = false;
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "lay.period_length = 0; lay.play(0.0)\n"
+            "lay.stop; lay.loop(0.0)\n",
+            "sound loop verification");
+    }
+    if (ok && (audio_active_voices() != 1 ||
+               !audio_render_frames(frames * 2 + (uint64_t)sample_rate) ||
+               audio_active_voices() != 1)) {
+        fprintf(stderr, "rubyboot: looping Sound did not remain active\n");
+        ok = false;
+    }
+    if (ok) {
+        ok = rbh_eval("lay.stop", "sound stop verification");
+    }
+    if (ok && audio_active_voices() != 0) {
+        fprintf(stderr, "rubyboot: Sound#stop left active voices\n");
+        ok = false;
+    }
+
     // Rotational grab: the goose body is move=0/rotate=1 and hangs on a
     // rotational joint - pulling the grab anchor sideways must TWIST it
     // past the lay angle, which lays an egg through the timer script.
@@ -220,6 +290,24 @@ int main(int argc, char** argv) {
             "raise 'no egg from rocking' unless $default_engine.toys.count > before\n"
             "$default_engine.input_release(body, input, body.position)\n",
             "rotational grab verification");
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "goose.sounds.each {|sound| sound.stop }\n"
+            "goose.sounds.by_sid(:lay).loop(0.0)\n",
+            "sound teardown setup");
+    }
+    if (ok && audio_active_voices() != 1) {
+        fprintf(stderr, "rubyboot: teardown loop setup failed\n");
+        ok = false;
+    }
+    if (ok) {
+        ok = rbh_eval("$default_engine.toys.remove(goose)",
+                      "sound teardown verification");
+    }
+    if (ok && audio_active_voices() != 0) {
+        fprintf(stderr, "rubyboot: toy teardown left active Sound voices\n");
+        ok = false;
     }
 
     // Shipped polygon sensor integration: a descending Basketball crossing
@@ -257,5 +345,6 @@ int main(int argc, char** argv) {
 
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");
     rbh_shutdown();
+    audio_shutdown();
     return ok ? 0 : 1;
 }

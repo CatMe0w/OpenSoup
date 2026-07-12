@@ -6,6 +6,7 @@
 #import <MetalKit/MetalKit.h>
 
 #include "scene.h"
+#include "audio.h"
 #include "demo.h"
 #include "rubyhost.h"
 #include "toydefs.h"
@@ -184,6 +185,8 @@ static float down_pos[2];
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
     scene_shutdown();
+    rbh_shutdown();
+    audio_shutdown();
 }
 @end
 
@@ -199,6 +202,9 @@ int main(int argc, char** argv) {
     //
     // Framework-only for now; the native demo still owns the scene.
     {
+        if (!audio_init(false)) {
+            NSLog(@"Audio output unavailable, continuing silent");
+        }
         char p[1024];
         snprintf(p, sizeof p, "%s/toydefs.json", assets_root);
         if (!toydefs_load(p)) {
