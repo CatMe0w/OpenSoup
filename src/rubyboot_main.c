@@ -80,6 +80,26 @@ int main(int argc, char** argv) {
             "bluebear verification");
     }
 
+    // Input grab: the framework-facing mouse spring. Grab the bear's head,
+    // drag the target across the scene, and the limb must follow.
+    if (ok) {
+        ok = rbh_eval(
+            "t = $default_engine.toys.by_index(1)\n"
+            "head = t.limbs.by_sid(:Head)\n"
+            "input = $default_engine.input_by_id(:default)\n"
+            "$default_engine.input_grab(head, input, head.position)\n"
+            "raise 'input.limb' unless input.limb == head\n"
+            "$default_engine.input_move(input, Vector[6.0, 6.0])\n"
+            "$default_engine.run_steps(300)\n"
+            "d = (head.position - Vector[6.0, 6.0]).r\n"
+            "STDERR.puts format('rubyboot: grabbed head at %.2f,%.2f (%.2f from target)',\n"
+            "  head.position.x, head.position.y, d)\n"
+            "raise 'grab did not pull' unless d < 1.0\n"
+            "$default_engine.input_release(head, input, head.position)\n"
+            "raise 'release' unless input.limb.nil?\n",
+            "input grab verification");
+    }
+
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");
     rbh_shutdown();
     return ok ? 0 : 1;

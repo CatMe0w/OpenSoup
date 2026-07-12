@@ -7,6 +7,7 @@
 #define MAX_FRAMES 256
 
 typedef struct {
+    int id;     // stable handle handed to callers; draw order reorders freely
     float x, y; // fractional position lives here; blit position is trunc'd
     int w, h;
     int nframes;
@@ -34,10 +35,18 @@ static struct {
     sg_sampler smp;
     sprite_t sprites[MAX_SPRITES];
     int nsprites;
-    int grabbed;        // sprite index or -1
-    float grab_off[2];
+    int next_id;
     float view_h;       // device px, for world<->view y flip
 } state;
+
+static sprite_t* by_id(int id) {
+    for (int i = 0; i < state.nsprites; i++) {
+        if (state.sprites[i].id == id) {
+            return &state.sprites[i];
+        }
+    }
+    return NULL;
+}
 
 // world (meters, y-up, origin bottom-left) <-> view (device px, y-down)
 // FLC frames rotate about the CANVAS CENTRE (verified: rotated frames' art
@@ -64,8 +73,6 @@ void scene_setup(const sg_environment* env) {
         .image_pool_size = 4096,
         .view_pool_size = 4096,
     });
-    state.grabbed = -1;
-
     // unit quad, expanded to pixel rects in the vertex shader
     const float corners[] = { 0, 0, 1, 0, 0, 1, 1, 1 };
     state.quad = sg_make_buffer(&(sg_buffer_desc){ .data = SG_RANGE(corners) });
@@ -143,7 +150,8 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     if (state.nsprites >= MAX_SPRITES || nframes < 1 || nframes > MAX_FRAMES) {
         return -1;
     }
-    sprite_t* s = &state.sprites[state.nsprites];
+    sprite_t* s = &state.sprites[state.nsprites++];
+    s->id = state.next_id++;
     s->x = x_px;
     s->y = y_px;
     s->w = w;
@@ -167,13 +175,21 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
             }),
         });
     }
-    return state.nsprites++;
+    return s->id;
 }
 
 void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y) {
-    state.sprites[sprite].body = body;
-    state.sprites[sprite].ax = anchor_x;
-    state.sprites[sprite].ay = anchor_y;
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->body = body;
+        s->ax = anchor_x;
+        s->ay = anchor_y;
+    }
+}
+
+int scene_sprite_body(int sprite) {
+    const sprite_t* s = by_id(sprite);
+    return s ? s->body : -1;
 }
 
 void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
@@ -253,18 +269,19 @@ bool scene_hit_test(float x, float y) {
     return sprite_at(x, y) >= 0;
 }
 
-bool scene_grab_begin(float x, float y) {
+int scene_pick(float x, float y) {
     const int i = sprite_at(x, y);
-    if (i < 0) {
-        return false;
+    return i >= 0 ? state.sprites[i].id : -1;
+}
+
+void scene_raise(int sprite) {
+    const sprite_t* hit = by_id(sprite);
+    if (!hit) {
+        return;
     }
-    // raise the whole toy group to the front (stable: intra-group zOrder
-    // stays); the hit sprite becomes the grabbed one at its new index
-    const int group = state.sprites[i].group;
-    const int hit_body = state.sprites[i].body;
-    const float hit_x = state.sprites[i].x, hit_y = state.sprites[i].y;
+    const int group = hit->group;
     sprite_t reordered[MAX_SPRITES];
-    int n = 0, grabbed = -1;
+    int n = 0;
     for (int k = 0; k < state.nsprites; k++) {
         if (state.sprites[k].group != group) {
             reordered[n++] = state.sprites[k];
@@ -272,59 +289,11 @@ bool scene_grab_begin(float x, float y) {
     }
     for (int k = 0; k < state.nsprites; k++) {
         if (state.sprites[k].group == group) {
-            if (k == i) {
-                grabbed = n;
-            }
             reordered[n++] = state.sprites[k];
         }
     }
     for (int k = 0; k < n; k++) {
         state.sprites[k] = reordered[k];
     }
-    state.grabbed = grabbed;
-    if (hit_body >= 0) {
-        // offset from the BODY's screen position, so the spring target
-        // preserves where on the toy the user grabbed
-        float wx, wy;
-        phys_body_pos(hit_body, &wx, &wy);
-        state.grab_off[0] = x - wx * PHYS_PX_PER_UNIT;
-        state.grab_off[1] = y - (state.view_h - wy * PHYS_PX_PER_UNIT);
-        phys_grab(hit_body);
-    } else {
-        state.grab_off[0] = x - hit_x;
-        state.grab_off[1] = y - hit_y;
-    }
-    return true;
 }
 
-void scene_grab_move(float x, float y) {
-    if (state.grabbed < 0) {
-        return;
-    }
-    sprite_t* s = &state.sprites[state.grabbed];
-    if (s->body >= 0) {
-        // cursor -> desired body screen pos -> world = the spring target;
-        // the body (and thus the sprite) follows via the mouse spring
-        const float bx = x - state.grab_off[0];
-        const float by = y - state.grab_off[1];
-        phys_grab_move(s->body, bx / PHYS_PX_PER_UNIT,
-                       (state.view_h - by) / PHYS_PX_PER_UNIT);
-    } else {
-        s->x = x - state.grab_off[0];
-        s->y = y - state.grab_off[1];
-    }
-}
-
-void scene_grab_end(void) {
-    if (state.grabbed >= 0) {
-        const sprite_t* s = &state.sprites[state.grabbed];
-        if (s->body >= 0) {
-            phys_release(s->body);
-        }
-    }
-    state.grabbed = -1;
-}
-
-bool scene_grabbing(void) {
-    return state.grabbed >= 0;
-}

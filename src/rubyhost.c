@@ -134,6 +134,11 @@ static void vec_get(VALUE v, double* x, double* y) {
 static rbh_sprite_fn g_sprite_fn;
 static void* g_sprite_user;
 
+// scene sprite id -> Ruby Sprite node (nodes stay reachable via the toy
+// tree; entries go stale only on toy removal, which has no teardown yet)
+#define MAX_SCENE_SPRITES 1024
+static VALUE g_scene_sprite[MAX_SCENE_SPRITES];
+
 void rbh_set_sprite_hook(rbh_sprite_fn fn, void* user) {
     g_sprite_fn = fn;
     g_sprite_user = user;
@@ -182,16 +187,18 @@ static void toy_realize(VALUE toyv) {
     if (!g_sprite_fn) {
         return; // headless: physics only
     }
-    struct { const td_sprite* sp; int body; } vis[128];
+    struct { const td_sprite* sp; int body; VALUE node; } vis[128];
     int nvis = 0;
     for (long i = 0; i < RARRAY(limbs)->len && nvis < 128; i++) {
         sn_t* ln = sn_get(rb_ary_entry(limbs, i));
         VALUE sprites = sn_get(ln->colls[0])->items;
         for (long s = 0; s < RARRAY(sprites)->len && nvis < 128; s++) {
-            const td_sprite* sp = sn_get(rb_ary_entry(sprites, s))->spdef;
+            VALUE node = rb_ary_entry(sprites, s);
+            const td_sprite* sp = sn_get(node)->spdef;
             if (sp && sp->image) {
                 vis[nvis].sp = sp;
                 vis[nvis].body = ln->body;
+                vis[nvis].node = node;
                 nvis++;
             }
         }
@@ -199,6 +206,7 @@ static void toy_realize(VALUE toyv) {
     for (int a = 1; a < nvis; a++) { // insertion sort, zOrder descending
         const td_sprite* sp = vis[a].sp;
         const int body = vis[a].body;
+        const VALUE node = vis[a].node;
         int b = a;
         while (b > 0 && vis[b - 1].sp->z_order < sp->z_order) {
             vis[b] = vis[b - 1];
@@ -206,10 +214,15 @@ static void toy_realize(VALUE toyv) {
         }
         vis[b].sp = sp;
         vis[b].body = body;
+        vis[b].node = node;
     }
     for (int i = 0; i < nvis; i++) {
-        g_sprite_fn(vis[i].sp->image, vis[i].body, vis[i].sp->com[0],
-                    vis[i].sp->com[1], t->instance_id, g_sprite_user);
+        const int id = g_sprite_fn(vis[i].sp->image, vis[i].body,
+                                   vis[i].sp->com[0], vis[i].sp->com[1],
+                                   t->instance_id, g_sprite_user);
+        if (id >= 0 && id < MAX_SCENE_SPRITES) {
+            g_scene_sprite[id] = vis[i].node;
+        }
     }
 }
 
@@ -358,7 +371,9 @@ static VALUE alloc_engine(VALUE klass) {
     sn_t* n = sn_get(v);
     n->inputs = rb_ary_new();
     n->timers = rb_ary_new();
-    n->colls[0] = coll_new_named("ToyContainer", v, v);
+    // parent stays nil: the toys container is the event-bubble ROOT
+    // (events.rb route_bubble walks parents; REngine is not a SoupNode)
+    n->colls[0] = coll_new_named("ToyContainer", Qnil, v);
     return v;
 }
 
@@ -653,6 +668,104 @@ static VALUE eng_screen_tl(VALUE self) {
 static VALUE eng_screen_br(VALUE self) {
     (void)self;
     return vec_new(g_screen_w, g_screen_h);
+}
+
+// Coordinate spaces: view/screen = device px y-down; canvas = px y-down with
+// origin at the canvas rect's top-left; scene = meters y-up, scene_top_right
+// stored NEGATED (framework convention). scale = px per scene unit.
+static VALUE eng_view_to_canvas(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y;
+    vec_get(v, &x, &y);
+    return vec_new(x - n->canvas_tl[0], y - n->canvas_tl[1]);
+}
+
+static VALUE eng_canvas_to_view(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y;
+    vec_get(v, &x, &y);
+    return vec_new(x + n->canvas_tl[0], y + n->canvas_tl[1]);
+}
+
+static VALUE eng_canvas_to_scene(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y;
+    vec_get(v, &x, &y);
+    const double ch = n->canvas_br[1] - n->canvas_tl[1];
+    return vec_new(n->scene_bl[0] + x / n->scale,
+                   n->scene_bl[1] + (ch - y) / n->scale);
+}
+
+static VALUE eng_scene_to_canvas(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    double x, y;
+    vec_get(v, &x, &y);
+    const double ch = n->canvas_br[1] - n->canvas_tl[1];
+    return vec_new((x - n->scene_bl[0]) * n->scale,
+                   ch - (y - n->scene_bl[1]) * n->scale);
+}
+
+static VALUE eng_view_to_scene(VALUE self, VALUE v) {
+    return eng_canvas_to_scene(self, eng_view_to_canvas(self, v));
+}
+
+static VALUE eng_scene_to_view(VALUE self, VALUE v) {
+    return eng_canvas_to_view(self, eng_scene_to_canvas(self, v));
+}
+
+// Input grab triplet - the mouse spring. Our phys spring targets the body
+// ORIGIN, so the grab-point offset (body - grab pos, scene meters) is kept
+// on the RInput and re-applied on every move.
+static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
+    (void)self;
+    sn_t* ln = sn_get(limb);
+    sn_t* in = sn_get(input);
+    if (ln->body >= 0) {
+        double px, py;
+        vec_get(pos, &px, &py);
+        float bx, by;
+        phys_body_pos(ln->body, &bx, &by);
+        in->ref1 = limb;
+        in->px = bx - px;
+        in->py = by - py;
+        phys_grab(ln->body);
+    }
+    return Qnil;
+}
+
+static VALUE eng_input_move(VALUE self, VALUE input, VALUE pos) {
+    (void)self;
+    sn_t* in = sn_get(input);
+    if (!NIL_P(in->ref1)) {
+        sn_t* ln = sn_get(in->ref1);
+        if (ln->body >= 0) {
+            double px, py;
+            vec_get(pos, &px, &py);
+            phys_grab_move(ln->body, (float)(px + in->px),
+                           (float)(py + in->py));
+        }
+    }
+    return Qnil;
+}
+
+static VALUE eng_input_release(VALUE self, VALUE limb, VALUE input,
+                               VALUE pos) {
+    (void)self;
+    (void)limb;
+    (void)pos;
+    sn_t* in = sn_get(input);
+    if (!NIL_P(in->ref1)) {
+        sn_t* ln = sn_get(in->ref1);
+        if (ln->body >= 0) {
+            phys_release(ln->body);
+        }
+        in->ref1 = Qnil;
+    }
+    return Qnil;
+}
+
+static VALUE input_limb(VALUE self) {
+    return sn_get(self)->ref1;
 }
 
 static VALUE eng_scale(VALUE self) {
@@ -963,6 +1076,15 @@ static void define_real(void) {
     rb_define_method(c, "canvas_bottom_right=", eng_canvas_br_set, 1);
     rb_define_method(c, "screen_top_left", eng_screen_tl, 0);
     rb_define_method(c, "screen_bottom_right", eng_screen_br, 0);
+    rb_define_method(c, "view_to_canvas", eng_view_to_canvas, 1);
+    rb_define_method(c, "canvas_to_view", eng_canvas_to_view, 1);
+    rb_define_method(c, "canvas_to_scene", eng_canvas_to_scene, 1);
+    rb_define_method(c, "scene_to_canvas", eng_scene_to_canvas, 1);
+    rb_define_method(c, "view_to_scene", eng_view_to_scene, 1);
+    rb_define_method(c, "scene_to_view", eng_scene_to_view, 1);
+    rb_define_method(c, "input_grab", eng_input_grab, 3);
+    rb_define_method(c, "input_move", eng_input_move, 2);
+    rb_define_method(c, "input_release", eng_input_release, 3);
     rb_define_method(c, "scale", eng_scale, 0);
     rb_define_method(c, "scale=", eng_scale_set, 1);
     rb_define_method(c, "gravity", eng_gravity, 0);
@@ -983,6 +1105,9 @@ static void define_real(void) {
     rb_define_method(c, "add_engine", core_add_engine, 1);
     rb_define_method(c, "remove_engine", core_remove_engine, 1);
     rb_define_method(c, "each_engine", core_each_engine, 0);
+
+    c = cls_find("RInput");
+    rb_define_method(c, "limb", input_limb, 0);
 
     c = cls_find("Souptoys");
     rb_define_method(c, "resource_exists", soup_resource_exists, 1);
@@ -1033,7 +1158,7 @@ struct fcall {
     VALUE recv;
     ID id;
     int argc;
-    VALUE argv[2];
+    VALUE argv[3];
 };
 
 static VALUE fcall_thunk(VALUE arg) {
@@ -1042,8 +1167,8 @@ static VALUE fcall_thunk(VALUE arg) {
 }
 
 static bool fcall_protected(VALUE recv, const char* name, int argc,
-                            VALUE a0, const char* what) {
-    struct fcall f = { recv, rb_intern(name), argc, { a0, Qnil } };
+                            VALUE a0, VALUE a1, VALUE a2, const char* what) {
+    struct fcall f = { recv, rb_intern(name), argc, { a0, a1, a2 } };
     int state = 0;
     rb_protect(fcall_thunk, (VALUE)&f, &state);
     if (state == 0) {
@@ -1071,8 +1196,9 @@ void rbh_frame(double dt_ms) {
     if (NIL_P(eng)) {
         return;
     }
-    fcall_protected(eng, "run_steps", 1, INT2FIX(steps), "run_steps");
-    fcall_protected(eng, "dispatch_timers", 1, INT2FIX(steps),
+    fcall_protected(eng, "run_steps", 1, INT2FIX(steps), Qnil, Qnil,
+                    "run_steps");
+    fcall_protected(eng, "dispatch_timers", 1, INT2FIX(steps), Qnil, Qnil,
                     "dispatch_timers");
 }
 
@@ -1081,7 +1207,7 @@ void rbh_screen_size(double w_px, double h_px) {
     g_screen_h = h_px;
     VALUE core = rb_gv_get("$core");
     if (!NIL_P(core)) {
-        fcall_protected(core, "screen_size_changed", 0, Qnil,
+        fcall_protected(core, "screen_size_changed", 0, Qnil, Qnil, Qnil,
                         "screen_size_changed");
     }
 }
@@ -1193,6 +1319,44 @@ bool rbh_spawn_toy(const char* class_name, const char* class_dir,
              "$default_engine.toys << t\n",
              class_name, class_dir ? class_dir : ".", x_m, y_m);
     return rbh_eval(code, class_name);
+}
+
+// Mouse dispatch: the app picks the hit sprite (alpha test is scene-side)
+// and hands VIEW coordinates here; the Sprite's internal_mouse_* framework
+// methods convert to scene space and bubble the event up the node tree
+// (Limb#mouse_down runs the default grab, ToyContainer#mouse_move drives
+// input_move).
+static VALUE sprite_node(int sprite) {
+    if (sprite < 0 || sprite >= MAX_SCENE_SPRITES) {
+        return Qnil;
+    }
+    VALUE v = g_scene_sprite[sprite];
+    return v ? v : Qnil;
+}
+
+void rbh_mouse_down(int sprite, double x_px, double y_px, int button) {
+    VALUE sp = sprite_node(sprite);
+    if (!NIL_P(sp)) {
+        fcall_protected(sp, "internal_mouse_down", 2, vec_new(x_px, y_px),
+                        INT2FIX(button), Qnil, "mouse_down");
+    }
+}
+
+void rbh_mouse_move(int sprite, double x_px, double y_px, int button,
+                    bool down) {
+    VALUE sp = sprite_node(sprite);
+    if (!NIL_P(sp)) {
+        fcall_protected(sp, "internal_mouse_move", 3, vec_new(x_px, y_px),
+                        INT2FIX(button), down ? Qtrue : Qfalse, "mouse_move");
+    }
+}
+
+void rbh_mouse_up(int sprite, double x_px, double y_px, int button) {
+    VALUE sp = sprite_node(sprite);
+    if (!NIL_P(sp)) {
+        fcall_protected(sp, "internal_mouse_up", 2, vec_new(x_px, y_px),
+                        INT2FIX(button), Qnil, "mouse_up");
+    }
 }
 
 void rbh_shutdown(void) {

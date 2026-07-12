@@ -47,19 +47,35 @@ static void to_px(NSPoint p, float* x, float* y) {
     (void)event;
     return YES;
 }
+// mouse events route through Ruby: pick the sprite here (alpha test is
+// scene-side), then Sprite#internal_mouse_* bubbles the event and the
+// framework's default grab (limb.rb) drives engine.input_grab/move/release.
+// captured = the mouse-downed sprite, our stand-in for Win32 mouse capture.
+static int captured_sprite = -1;
 - (void)mouseDown:(NSEvent*)event {
     float x, y;
     to_px([event locationInWindow], &x, &y);
-    scene_grab_begin(x, y);
+    const int sprite = scene_pick(x, y);
+    if (sprite >= 0) {
+        scene_raise(sprite);
+        captured_sprite = sprite;
+        rbh_mouse_down(sprite, x, y, 1);
+    }
 }
 - (void)mouseDragged:(NSEvent*)event {
-    float x, y;
-    to_px([event locationInWindow], &x, &y);
-    scene_grab_move(x, y);
+    if (captured_sprite >= 0) {
+        float x, y;
+        to_px([event locationInWindow], &x, &y);
+        rbh_mouse_move(captured_sprite, x, y, 1, true);
+    }
 }
 - (void)mouseUp:(NSEvent*)event {
-    (void)event;
-    scene_grab_end();
+    if (captured_sprite >= 0) {
+        float x, y;
+        to_px([event locationInWindow], &x, &y);
+        rbh_mouse_up(captured_sprite, x, y, 1);
+        captured_sprite = -1;
+    }
 }
 - (void)keyDown:(NSEvent*)event {
     if (event.keyCode == 53) { // Esc
@@ -78,8 +94,8 @@ static void to_px(NSPoint p, float* x, float* y) {
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
         // per-pixel click-through: poll the global cursor, hit-test the
-        // scene, toggle ignoresMouseEvents. Never toggle mid-grab.
-        if (!scene_grabbing()) {
+        // scene, toggle ignoresMouseEvents. Never toggle mid-drag.
+        if (captured_sprite < 0) {
             const NSPoint p = [NSEvent mouseLocation];
             const NSRect f = window.frame;
             float x, y;

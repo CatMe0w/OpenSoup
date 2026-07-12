@@ -37,6 +37,14 @@ bool rbh_spawn_toy(const char* class_name, const char* class_dir,
 // $default_engine.run_steps + dispatch_timers through the framework.
 void rbh_frame(double dt_ms);
 
+// Mouse dispatch. sprite = the scene sprite id the app picked (alpha
+// hit-test); coordinates are view space (device px, y-down). Events run
+// the framework chain: Sprite#internal_mouse_* -> bubble -> default grab.
+void rbh_mouse_down(int sprite, double x_px, double y_px, int button);
+void rbh_mouse_move(int sprite, double x_px, double y_px, int button,
+                    bool down);
+void rbh_mouse_up(int sprite, double x_px, double y_px, int button);
+
 // Report the view size in device pixels. Fires $core.screen_size_changed;
 // engines with fit_to_screen re-derive canvas/scene rects, which lands in
 // phys_set_world via the scene_walls_changed chain.
