@@ -3,13 +3,14 @@
 #include "sokol_log.h"
 #include <math.h>
 
-#define MAX_SPRITES 64
+#define MAX_SPRITES 256
 #define MAX_FRAMES 256
 
 typedef struct {
     int id;     // stable handle handed to callers; draw order reorders freely
     float x, y; // fractional position lives here; blit position is trunc'd
-    int w, h;
+    int w, h;               // source texture dimensions
+    float draw_w, draw_h;   // destination dimensions
     int nframes;
     int frame;
     int speed_ms;
@@ -20,13 +21,21 @@ typedef struct {
     int body;               // physics body index or -1
     float ax, ay;           // body origin in canvas px relative to centre, y-down
     int group;              // toy group; grabbed together, raised together
+    int layer;              // higher layers draw and hit-test above lower ones
+    float alpha;
+    float uv_scale[2];
+    bool visible;
+    bool animate;
+    bool clip_enabled;
+    float clip[4];          // x, y, w, h in device pixels, top-left origin
 } sprite_t;
 
 typedef struct {
     float pos[2];
     float size[2];
     float viewport[2];
-    float _pad[2];
+    float uv_scale[2];
+    float tint[4];
 } vs_params_t;
 
 static struct {
@@ -82,6 +91,8 @@ void scene_setup(const sg_environment* env) {
     state.smp = sg_make_sampler(&(sg_sampler_desc){
         .min_filter = SG_FILTER_NEAREST,
         .mag_filter = SG_FILTER_NEAREST,
+        .wrap_u = SG_WRAP_REPEAT,
+        .wrap_v = SG_WRAP_REPEAT,
     });
 
     sg_shader shd = sg_make_shader(&(sg_shader_desc){
@@ -100,6 +111,8 @@ void scene_setup(const sg_environment* env) {
             "  float2 pos;\n"
             "  float2 size;\n"
             "  float2 viewport;\n"
+            "  float2 uv_scale;\n"
+            "  float4 tint;\n"
             "};\n"
             "struct vs_in {\n"
             "  float2 corner [[attribute(0)]];\n"
@@ -107,21 +120,24 @@ void scene_setup(const sg_environment* env) {
             "struct vs_out {\n"
             "  float4 pos [[position]];\n"
             "  float2 uv;\n"
+            "  float4 tint;\n"
             "};\n"
             "vertex vs_out _main(vs_in in [[stage_in]], constant params_t& params [[buffer(0)]]) {\n"
             "  vs_out out;\n"
             "  float2 px = params.pos + in.corner * params.size;\n"
             "  out.pos = float4(2.0 * px.x / params.viewport.x - 1.0,\n"
             "                   1.0 - 2.0 * px.y / params.viewport.y, 0.5, 1.0);\n"
-            "  out.uv = in.corner;\n"
+            "  out.uv = in.corner * params.uv_scale;\n"
+            "  out.tint = params.tint;\n"
             "  return out;\n"
             "}\n",
         .fragment_func.source =
             "#include <metal_stdlib>\n"
             "using namespace metal;\n"
-            "fragment float4 _main(float2 uv [[stage_in]],\n"
+            "struct fs_in { float2 uv; float4 tint; };\n"
+            "fragment float4 _main(fs_in in [[stage_in]],\n"
             "  texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]]) {\n"
-            "  return tex.sample(smp, uv);\n"
+            "  return tex.sample(smp, in.uv) * in.tint;\n"
             "}\n",
     });
 
@@ -157,6 +173,8 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->y = y_px;
     s->w = w;
     s->h = h;
+    s->draw_w = (float)w;
+    s->draw_h = (float)h;
     s->nframes = nframes;
     s->frame = 0;
     s->speed_ms = speed_ms;
@@ -166,6 +184,13 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->ax = 0;
     s->ay = 0;
     s->group = group;
+    s->layer = 0;
+    s->alpha = 1.0f;
+    s->uv_scale[0] = 1.0f;
+    s->uv_scale[1] = 1.0f;
+    s->visible = true;
+    s->animate = true;
+    s->clip_enabled = false;
     for (int f = 0; f < nframes; f++) {
         s->imgs[f] = sg_make_image(&(sg_image_desc){
             .width = w,
@@ -177,7 +202,17 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
             .texture.image = s->imgs[f],
         });
     }
-    return s->id;
+    const int id = s->id;
+    // New world sprites may be created after the Toybox. Keep layers sorted
+    // so default layer 0 is inserted below any existing UI layer.
+    int at = state.nsprites - 1;
+    while (at > 0 && state.sprites[at - 1].layer > state.sprites[at].layer) {
+        const sprite_t tmp = state.sprites[at - 1];
+        state.sprites[at - 1] = state.sprites[at];
+        state.sprites[at] = tmp;
+        at--;
+    }
+    return id;
 }
 
 void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y) {
@@ -186,6 +221,90 @@ void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y
         s->body = body;
         s->ax = anchor_x;
         s->ay = anchor_y;
+    }
+}
+
+void scene_sprite_set_position(int sprite, float x_px, float y_px) {
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->x = x_px;
+        s->y = y_px;
+    }
+}
+
+void scene_sprite_set_size(int sprite, float w_px, float h_px) {
+    sprite_t* s = by_id(sprite);
+    if (s && w_px > 0.0f && h_px > 0.0f) {
+        s->draw_w = w_px;
+        s->draw_h = h_px;
+    }
+}
+
+void scene_sprite_set_frame(int sprite, int frame) {
+    sprite_t* s = by_id(sprite);
+    if (s && s->nframes > 0) {
+        frame %= s->nframes;
+        if (frame < 0) {
+            frame += s->nframes;
+        }
+        s->frame = frame;
+        s->animate = false;
+    }
+}
+
+void scene_sprite_set_alpha(int sprite, float alpha) {
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    }
+}
+
+void scene_sprite_set_visible(int sprite, bool visible) {
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->visible = visible;
+    }
+}
+
+void scene_sprite_set_layer(int sprite, int layer) {
+    sprite_t* s = by_id(sprite);
+    if (!s || s->layer == layer) {
+        return;
+    }
+    s->layer = layer;
+    int at = (int)(s - state.sprites);
+    while (at > 0 && state.sprites[at - 1].layer > state.sprites[at].layer) {
+        const sprite_t tmp = state.sprites[at - 1];
+        state.sprites[at - 1] = state.sprites[at];
+        state.sprites[at] = tmp;
+        at--;
+    }
+    while (at + 1 < state.nsprites &&
+           state.sprites[at + 1].layer <= state.sprites[at].layer) {
+        const sprite_t tmp = state.sprites[at + 1];
+        state.sprites[at + 1] = state.sprites[at];
+        state.sprites[at] = tmp;
+        at++;
+    }
+}
+
+void scene_sprite_set_uv_scale(int sprite, float u, float v) {
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->uv_scale[0] = u;
+        s->uv_scale[1] = v;
+    }
+}
+
+void scene_sprite_set_clip(int sprite, bool enabled, float x_px, float y_px,
+                           float w_px, float h_px) {
+    sprite_t* s = by_id(sprite);
+    if (s) {
+        s->clip_enabled = enabled;
+        s->clip[0] = x_px;
+        s->clip[1] = y_px;
+        s->clip[2] = w_px;
+        s->clip[3] = h_px;
     }
 }
 
@@ -230,7 +349,7 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
                 int f = (int)((wrapped < 0 ? wrapped + 1.0f : wrapped) * (float)s->nframes);
                 s->frame = (f >= s->nframes) ? 0 : f;
             }
-        } else if (s->nframes > 1) { // unbound sprites: timed animation
+        } else if (s->animate && s->nframes > 1) { // unbound: timed animation
             s->acc_ms += dt_ms;
             while (s->acc_ms >= s->speed_ms) {
                 s->acc_ms -= s->speed_ms;
@@ -243,12 +362,24 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
     sg_apply_pipeline(state.pip);
     for (int i = 0; i < state.nsprites; i++) {
         const sprite_t* s = &state.sprites[i];
+        if (!s->visible || s->alpha <= 0.0f) {
+            continue;
+        }
+        if (s->clip_enabled) {
+            sg_apply_scissor_rect((int)s->clip[0], (int)s->clip[1],
+                                  (int)s->clip[2], (int)s->clip[3], true);
+        } else {
+            sg_apply_scissor_rect(0, 0, swapchain->width, swapchain->height,
+                                  true);
+        }
         const vs_params_t params = {
             // original blit positions are integer pixels, trunc toward zero
             // (Toybox.exe converts via fldcw 0xC00 fistp / __ftol2_sse)
             .pos = { (float)(int)s->x, (float)(int)s->y },
-            .size = { (float)s->w, (float)s->h },
+            .size = { s->draw_w, s->draw_h },
             .viewport = { (float)swapchain->width, (float)swapchain->height },
+            .uv_scale = { s->uv_scale[0], s->uv_scale[1] },
+            .tint = { s->alpha, s->alpha, s->alpha, s->alpha },
         };
         sg_apply_bindings(&(sg_bindings){
             .vertex_buffers[0] = state.quad,
@@ -271,11 +402,24 @@ void scene_shutdown(void) {
 static int sprite_at(float x, float y) {
     for (int i = state.nsprites - 1; i >= 0; i--) {
         const sprite_t* s = &state.sprites[i];
-        const int lx = (int)x - (int)s->x;
-        const int ly = (int)y - (int)s->y;
-        if (lx < 0 || ly < 0 || lx >= s->w || ly >= s->h) {
+        if (!s->visible || s->alpha <= 0.0f) {
             continue;
         }
+        if (s->clip_enabled &&
+            (x < s->clip[0] || y < s->clip[1] ||
+             x >= s->clip[0] + s->clip[2] ||
+             y >= s->clip[1] + s->clip[3])) {
+            continue;
+        }
+        const float dx = x - (float)(int)s->x;
+        const float dy = y - (float)(int)s->y;
+        if (dx < 0.0f || dy < 0.0f || dx >= s->draw_w || dy >= s->draw_h) {
+            continue;
+        }
+        int lx = (int)(dx * (float)s->w * s->uv_scale[0] / s->draw_w);
+        int ly = (int)(dy * (float)s->h * s->uv_scale[1] / s->draw_h);
+        lx %= s->w;
+        ly %= s->h;
         if (s->pixels[s->frame][((size_t)ly * s->w + lx) * 4 + 3] > 0) {
             return i;
         }
@@ -298,15 +442,26 @@ void scene_raise(int sprite) {
         return;
     }
     const int group = hit->group;
+    const int layer = hit->layer;
     sprite_t reordered[MAX_SPRITES];
     int n = 0;
     for (int k = 0; k < state.nsprites; k++) {
-        if (state.sprites[k].group != group) {
+        if (state.sprites[k].layer < layer) {
             reordered[n++] = state.sprites[k];
         }
     }
     for (int k = 0; k < state.nsprites; k++) {
-        if (state.sprites[k].group == group) {
+        if (state.sprites[k].layer == layer && state.sprites[k].group != group) {
+            reordered[n++] = state.sprites[k];
+        }
+    }
+    for (int k = 0; k < state.nsprites; k++) {
+        if (state.sprites[k].layer == layer && state.sprites[k].group == group) {
+            reordered[n++] = state.sprites[k];
+        }
+    }
+    for (int k = 0; k < state.nsprites; k++) {
+        if (state.sprites[k].layer > layer) {
             reordered[n++] = state.sprites[k];
         }
     }
@@ -314,4 +469,3 @@ void scene_raise(int sprite) {
         state.sprites[k] = reordered[k];
     }
 }
-

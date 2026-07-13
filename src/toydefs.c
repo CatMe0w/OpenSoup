@@ -6,9 +6,15 @@
 #include <string.h>
 
 #define MAX_DEFS 256
+#define MAX_ICONS 256
+#define MAX_PACKS 32
 
 static toydef_t defs[MAX_DEFS];
 static int ndefs;
+static toyicon_t icons[MAX_ICONS];
+static int nicons;
+static toypack_t packs[MAX_PACKS];
+static int npacks;
 
 static float num(const cJSON* obj, const char* key, float fallback) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -153,6 +159,34 @@ bool toydefs_load(const char* json_path) {
         return false;
     }
     const cJSON* toys = cJSON_GetObjectItemCaseSensitive(root, "toys");
+
+    const cJSON* pack;
+    cJSON_ArrayForEach(pack, cJSON_GetObjectItemCaseSensitive(root, "packs")) {
+        if (npacks >= MAX_PACKS) {
+            break;
+        }
+        toypack_t* p = &packs[npacks++];
+        p->id = dupstr(pack, "id");
+        p->license = dupstr(pack, "license");
+        p->header = dupstr(pack, "header");
+        p->order = num(pack, "order", (float)npacks);
+    }
+
+    const cJSON* icon;
+    cJSON_ArrayForEach(icon, cJSON_GetObjectItemCaseSensitive(root, "icons")) {
+        if (nicons >= MAX_ICONS) {
+            break;
+        }
+        toyicon_t* i = &icons[nicons++];
+        i->name = dupstr(icon, "name");
+        i->class_name = dupstr(icon, "className");
+        i->image = dupstr(icon, "image");
+        i->num_frames = (int)num(icon, "numFrames", 1.0f);
+        i->instance_limit = (int)num(icon, "instanceLimit", 100.0f);
+        i->pack_order = num(icon, "packOrder", 0.0f);
+        i->order = num(icon, "order", 0.0f);
+    }
+
     const cJSON* toy;
     cJSON_ArrayForEach(toy, toys) {
         if (ndefs >= MAX_DEFS) {
@@ -248,4 +282,20 @@ const toydef_t* toydefs_find(const char* class_name) {
 
 int toydefs_count(void) {
     return ndefs;
+}
+
+int toydefs_icon_count(void) {
+    return nicons;
+}
+
+const toyicon_t* toydefs_icon_at(int index) {
+    return index >= 0 && index < nicons ? &icons[index] : NULL;
+}
+
+int toydefs_pack_count(void) {
+    return npacks;
+}
+
+const toypack_t* toydefs_pack_at(int index) {
+    return index >= 0 && index < npacks ? &packs[index] : NULL;
 }

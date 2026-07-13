@@ -1,13 +1,39 @@
 // Headless Ruby boot check: framework load through World instantiation,
 // no window. Exits 0 iff the whole boot + wall-position round trip works.
 #include "rubyhost.h"
+#include "assets.h"
 #include "audio.h"
 #include "toydefs.h"
+#include "toybox_scroll.h"
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(int argc, char** argv) {
     const char* assets = argc > 1 ? argv[1] : "private/extracted";
     char path[1024];
+
+    // Original IconGrid uniform-mode trajectory: mass=1, anchor k=300/c=25,
+    // air resistance=0.099, integrated by the engine's fixed 0.01s RK4.
+    // These checkpoints are the closed-form response to an 80px target step,
+    // independent of the implementation in toybox_scroll.c.
+    toybox_scroll_model scroll = {0};
+    toybox_scroll_model_set_target(&scroll, 80.0f);
+    toybox_scroll_model_advance(&scroll, 100.0);
+    const float scroll_100ms = scroll.position;
+    toybox_scroll_model_advance(&scroll, 100.0);
+    const float scroll_200ms = scroll.position;
+    toybox_scroll_model_advance(&scroll, 60.0);
+    const float scroll_260ms = scroll.position;
+    if (fabsf(scroll_100ms - 49.31147f) > 0.02f ||
+        fabsf(scroll_200ms - 80.06019f) > 0.02f ||
+        fabsf(scroll_260ms - 82.93851f) > 0.02f) {
+        fprintf(stderr, "rubyboot: Toybox scroll response wrong %.5f %.5f %.5f\n",
+                scroll_100ms, scroll_200ms, scroll_260ms);
+        return 1;
+    }
+    fprintf(stderr, "rubyboot: Toybox scroll %.2f -> %.2f -> %.2f px\n",
+            scroll_100ms, scroll_200ms, scroll_260ms);
 
     if (!audio_init(true)) {
         fprintf(stderr, "rubyboot: cannot initialize headless audio\n");
@@ -44,6 +70,60 @@ int main(int argc, char** argv) {
         audio_shutdown();
         return 1;
     }
+    if (toydefs_pack_count() < 7 || toydefs_icon_count() < 80) {
+        fprintf(stderr, "rubyboot: Toybox catalog missing (%d packs, %d icons)\n",
+                toydefs_pack_count(), toydefs_icon_count());
+        audio_shutdown();
+        return 1;
+    }
+    fprintf(stderr, "rubyboot: Toybox catalog %d packs, %d manifest icons\n",
+            toydefs_pack_count(), toydefs_icon_count());
+    int sports_icons = 0;
+    bool essbee_in_astrobots = false;
+    for (int i = 0; i < toydefs_icon_count(); i++) {
+        const toyicon_t* icon = toydefs_icon_at(i);
+        if (!icon) {
+            continue;
+        }
+        if (icon->pack_order > 0.99f && icon->pack_order < 1.01f) {
+            sports_icons++;
+        }
+        if (strcmp(icon->class_name, "REssBee") == 0 &&
+            icon->pack_order > 6.99f && icon->pack_order < 7.01f) {
+            essbee_in_astrobots = true;
+        }
+    }
+    if (sports_icons != 10 || !essbee_in_astrobots) {
+        fprintf(stderr,
+                "rubyboot: Toybox pack mapping wrong (Sports=%d, Essbee=%s)\n",
+                sports_icons, essbee_in_astrobots ? "Astrobots" : "other");
+        audio_shutdown();
+        return 1;
+    }
+    int decoded_icons = 0;
+    int decoded_icon_frames = 0;
+    for (int i = 0; i < toydefs_icon_count(); i++) {
+        const toyicon_t* icon = toydefs_icon_at(i);
+        if (!icon || icon->pack_order < 1.0f || icon->pack_order > 8.0f) {
+            continue;
+        }
+        const int frames = icon->num_frames < 6 ? icon->num_frames : 6;
+        for (int frame = 0; frame < frames; frame++) {
+            snprintf(path, sizeof path, "%s/%s%04d.tga", assets, icon->image,
+                     frame);
+            as_image image = {0};
+            if (!as_load_tga(path, &image)) {
+                fprintf(stderr, "rubyboot: cannot decode Toybox icon %s\n", path);
+                audio_shutdown();
+                return 1;
+            }
+            decoded_icon_frames++;
+            as_image_free(&image);
+        }
+        decoded_icons++;
+    }
+    fprintf(stderr, "rubyboot: decoded %d visible Toybox icons (%d frames)\n",
+            decoded_icons, decoded_icon_frames);
 
     snprintf(path, sizeof path, "%s/souptoys_core_toy", assets);
     bool ok = rbh_boot(path);

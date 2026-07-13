@@ -1913,6 +1913,27 @@ bool rbh_spawn_toy(const char* class_name, const char* class_dir,
     return rbh_eval(code, class_name);
 }
 
+bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m) {
+    const VALUE eng = rb_gv_get("$default_engine");
+    if (!sn_p(eng)) {
+        return false;
+    }
+    const sn_t* n = sn_get(eng);
+    if (n->scale == 0.0) {
+        return false;
+    }
+    const double canvas_x = x_px - n->canvas_tl[0];
+    const double canvas_y = y_px - n->canvas_tl[1];
+    const double canvas_h = n->canvas_br[1] - n->canvas_tl[1];
+    if (x_m) {
+        *x_m = n->scene_bl[0] + canvas_x / n->scale;
+    }
+    if (y_m) {
+        *y_m = n->scene_bl[1] + (canvas_h - canvas_y) / n->scale;
+    }
+    return true;
+}
+
 // Mouse dispatch: the app picks the hit sprite (alpha test is scene-side)
 // and hands VIEW coordinates here; the Sprite's internal_mouse_* framework
 // methods convert to scene space and bubble the event up the node tree

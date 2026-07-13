@@ -10,6 +10,7 @@
 #include "demo.h"
 #include "rubyhost.h"
 #include "toydefs.h"
+#include "toybox.h"
 
 static NSWindow* window;
 static MTKView* view;
@@ -57,6 +58,10 @@ static float down_pos[2];
 - (void)mouseDown:(NSEvent*)event {
     float x, y;
     to_px([event locationInWindow], &x, &y);
+    if (toybox_mouse_down(x, y)) {
+        captured_sprite = -1;
+        return;
+    }
     const int sprite = scene_pick(x, y);
     if (sprite >= 0) {
         scene_raise(sprite);
@@ -67,22 +72,39 @@ static float down_pos[2];
     }
 }
 - (void)mouseDragged:(NSEvent*)event {
-    if (captured_sprite >= 0) {
-        float x, y;
-        to_px([event locationInWindow], &x, &y);
+    float x, y;
+    to_px([event locationInWindow], &x, &y);
+    if (toybox_capturing()) {
+        toybox_mouse_dragged(x, y);
+    } else if (captured_sprite >= 0) {
         rbh_mouse_move(captured_sprite, x, y, 1, true);
     }
 }
 - (void)mouseUp:(NSEvent*)event {
-    if (captured_sprite >= 0) {
-        float x, y;
-        to_px([event locationInWindow], &x, &y);
+    float x, y;
+    to_px([event locationInWindow], &x, &y);
+    if (toybox_capturing()) {
+        toybox_mouse_up(x, y);
+    } else if (captured_sprite >= 0) {
         rbh_mouse_up(captured_sprite, x, y, 1);
         // barely-moved release = click (Win32 sends it on button release)
         if (fabsf(x - down_pos[0]) < 4 && fabsf(y - down_pos[1]) < 4) {
             rbh_mouse_click(captured_sprite, x, y, 1);
         }
         captured_sprite = -1;
+    }
+}
+- (void)scrollWheel:(NSEvent*)event {
+    float x, y;
+    to_px([event locationInWindow], &x, &y);
+    if (toybox_hit_test(x, y)) {
+        const bool precise = event.hasPreciseScrollingDeltas;
+        float delta_y = (float)event.scrollingDeltaY;
+        if (precise) {
+            // Toybox coordinates and layout are in backing/device pixels.
+            delta_y *= (float)window.backingScaleFactor;
+        }
+        toybox_scroll(delta_y, precise);
     }
 }
 - (void)keyDown:(NSEvent*)event {
@@ -98,22 +120,28 @@ static float down_pos[2];
 - (void)mtkView:(nonnull MTKView*)v drawableSizeWillChange:(CGSize)size {
     (void)v;
     rbh_screen_size(size.width, size.height);
+    toybox_resize(size.width, size.height);
 }
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
         // per-pixel click-through: poll the global cursor, hit-test the
         // scene, toggle ignoresMouseEvents. Never toggle mid-drag.
-        if (captured_sprite < 0) {
+        if (captured_sprite < 0 && !toybox_capturing()) {
             const NSPoint p = [NSEvent mouseLocation];
             const NSRect f = window.frame;
             float x, y;
             to_px(NSMakePoint(p.x - f.origin.x, p.y - f.origin.y), &x, &y);
-            window.ignoresMouseEvents = !scene_hit_test(x, y);
+            toybox_pointer_move(x, y);
+            window.ignoresMouseEvents =
+                !(toybox_hit_test(x, y) || scene_hit_test(x, y));
+        } else {
+            window.ignoresMouseEvents = NO;
         }
         const CFTimeInterval now = CACurrentMediaTime();
         const double dt_ms = last_frame_time > 0 ? (now - last_frame_time) * 1000.0 : 16.7;
         last_frame_time = now;
         rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
+        toybox_frame(dt_ms);
 
         const sg_swapchain swapchain = {
             .width = (int)v.drawableSize.width,
@@ -178,12 +206,17 @@ static float down_pos[2];
     rbh_screen_size(view.drawableSize.width, view.drawableSize.height);
 
     const int n = demo_load(assets_root);
-    NSLog(@"OpenSoup MVP up: %d sprites from %s; drag them, empty space clicks through, Esc quits", n, assets_root);
+    const bool toybox_ok = toybox_init(assets_root, view.drawableSize.width,
+                                       view.drawableSize.height);
+    NSLog(@"OpenSoup MVP up: %d demo toys, Toybox %s (%d icons) from %s; drag them, empty space clicks through, Esc quits",
+          n, toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
+          assets_root);
 
     [window orderFrontRegardless];
 }
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
+    toybox_shutdown();
     scene_shutdown();
     rbh_shutdown();
     audio_shutdown();

@@ -36,6 +36,10 @@ void rbh_set_sprite_hook(rbh_sprite_fn fn, rbh_sprite_remove_fn remove_fn,
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m);
 
+// Convert device-pixel view coordinates to the default engine's scene space.
+// Used by non-Ruby UI (Toybox drag/drop) before handing a spawn to Ruby.
+bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m);
+
 // resolve (and load, if the toy has a script) a toy class without
 // instantiating it - for classes other toys reference (Goose -> GooseEgg)
 bool rbh_load_toy_class(const char* class_name, const char* class_dir);

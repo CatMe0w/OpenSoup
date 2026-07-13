@@ -36,6 +36,8 @@ if(APPLE)
         src/scene.c
         src/assets.c
         src/demo.c
+        src/toybox.c
+        src/toybox_scroll.c
         src/physics.c
         src/toydefs.c
         src/toyphys.c
@@ -70,7 +72,9 @@ if(APPLE)
     # headless framework-boot check (no window; run from the repo root)
     add_executable(opensoup_rubyboot
         src/rubyboot_main.c
+        src/assets.c
         src/rubyhost.c
+        src/toybox_scroll.c
         src/physics.c
         src/toydefs.c
         src/toyphys.c

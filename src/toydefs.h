@@ -97,6 +97,31 @@ typedef struct {
     td_sound* sounds; // toy-level sound emitters
 } toydef_t;
 
+// Lightweight Toybox catalog records.  These come from the icon catalog in
+// each original .toy manifest; they are metadata only and never become
+// physics bodies.  image is an assets-root-relative TGA sequence prefix
+// (".../Ball Tennis" -> Ball Tennis0000.tga, Ball Tennis0001.tga).
+typedef struct {
+    const char* name;
+    const char* class_name;
+    const char* image;
+    int num_frames;
+    int instance_limit;
+    float pack_order;
+    float order;
+} toyicon_t;
+
+typedef struct {
+    const char* id;
+    const char* license;
+    const char* header; // assets-root-relative TGA sequence prefix
+    float order;
+} toypack_t;
+
 bool toydefs_load(const char* json_path);
 const toydef_t* toydefs_find(const char* class_name);
 int toydefs_count(void);
+int toydefs_icon_count(void);
+const toyicon_t* toydefs_icon_at(int index);
+int toydefs_pack_count(void);
+const toypack_t* toydefs_pack_at(int index);
