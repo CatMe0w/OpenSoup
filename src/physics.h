@@ -84,6 +84,10 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
                   float fallback_radius);
 void phys_steps(int n);
 
+// Number of live bodies (retired reusable slots excluded). Primarily useful
+// for capacity/accounting checks around transactional toy realization.
+int phys_active_body_count(void);
+
 // Final-state geometric overlap, independent of collision response groups.
 // World wall shapes are interpreted as the corresponding infinite planes.
 bool phys_shapes_overlap(int body1, int shape1, int body2, int shape2);

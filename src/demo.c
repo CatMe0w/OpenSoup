@@ -38,6 +38,83 @@ static char* alpha_variant(const char* color_path) {
     return p;
 }
 
+typedef struct cached_visual {
+    char* path;
+    int w, h, nframes, speed_ms;
+    uint8_t** frames;
+    struct cached_visual* next;
+} cached_visual;
+
+static cached_visual* visual_cache;
+
+// Toy instances frequently reuse the same FLC. Decode it once and keep one
+// stable frame-array identity so scene.c can share the corresponding GPU
+// textures across every instance.
+static cached_visual* visual_load(const char* path) {
+    for (cached_visual* v = visual_cache; v; v = v->next) {
+        if (strcmp(v->path, path) == 0) {
+            return v;
+        }
+    }
+    cached_visual* v = calloc(1, sizeof(*v));
+    if (!v) {
+        return NULL;
+    }
+    v->path = strdup(path);
+    if (!v->path) {
+        free(v);
+        return NULL;
+    }
+    const char* dot = strrchr(path, '.');
+    if (dot && strcmp(dot, ".flc") == 0) {
+        char* apath = alpha_variant(path);
+        as_anim anim = {0};
+        const bool ok = as_load_flc(path, apath, &anim);
+        free(apath);
+        if (!ok) {
+            free(v->path);
+            free(v);
+            return NULL;
+        }
+        v->w = anim.w;
+        v->h = anim.h;
+        v->nframes = anim.frame_count;
+        v->speed_ms = anim.speed_ms;
+        v->frames = anim.frames;
+    } else {
+        char* tpath = malloc(strlen(path) + sizeof("0000.tga"));
+        if (!tpath) {
+            free(v->path);
+            free(v);
+            return NULL;
+        }
+        strcpy(tpath, path);
+        strcat(tpath, "0000.tga");
+        as_image image = {0};
+        const bool ok = as_load_tga(tpath, &image);
+        free(tpath);
+        if (!ok) {
+            free(v->path);
+            free(v);
+            return NULL;
+        }
+        v->frames = malloc(sizeof(*v->frames));
+        if (!v->frames) {
+            as_image_free(&image);
+            free(v->path);
+            free(v);
+            return NULL;
+        }
+        v->frames[0] = image.rgba;
+        v->w = image.w;
+        v->h = image.h;
+        v->nframes = 1;
+    }
+    v->next = visual_cache;
+    visual_cache = v;
+    return v;
+}
+
 // Visual half of Ruby-side toy realization: load the sprite's FLC and hand
 // it to the scene. group = toy instance id, offset to its own range.
 static int ruby_sprite_hook(const char* image, int body, float com_x,
@@ -45,30 +122,11 @@ static int ruby_sprite_hook(const char* image, int body, float com_x,
     const char* assets_root = user;
     char* cpath = join(assets_root, image);
     int sprite = -1;
-    // leaked on purpose: scene borrows the pixel buffers for hit-testing
-    const char* dot = strrchr(cpath, '.');
-    if (dot && strcmp(dot, ".flc") == 0) {
-        char* apath = alpha_variant(cpath);
-        as_anim* anim = calloc(1, sizeof(as_anim));
-        if (as_load_flc(cpath, apath, anim)) {
-            sprite = scene_sprite_add(anim->w, anim->h, anim->frame_count,
-                                      anim->frames, anim->speed_ms,
-                                      0, 0, 1000 + group);
-        }
-        free(apath);
-    } else {
-        // extensionless = single-frame TGA: "<name>0000.tga"
-        char* tpath = malloc(strlen(cpath) + sizeof("0000.tga"));
-        strcpy(tpath, cpath);
-        strcat(tpath, "0000.tga");
-        as_image* img = calloc(1, sizeof(as_image));
-        if (as_load_tga(tpath, img)) {
-            uint8_t** frames = malloc(sizeof(uint8_t*));
-            frames[0] = img->rgba;
-            sprite = scene_sprite_add(img->w, img->h, 1, frames, 0,
-                                      0, 0, 1000 + group);
-        }
-        free(tpath);
+    cached_visual* visual = visual_load(cpath);
+    if (visual) {
+        sprite = scene_sprite_add(visual->w, visual->h, visual->nframes,
+                                  visual->frames, visual->speed_ms,
+                                  0, 0, 1000 + group);
     }
     if (sprite >= 0) {
         scene_sprite_bind_body(sprite, body, com_x, com_y);

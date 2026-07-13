@@ -1,9 +1,11 @@
 #include "physics.h"
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define MAX_BODIES 64
-#define MAX_JOINTS 128
+#define INITIAL_BODY_CAP 64
+#define INITIAL_JOINT_CAP 128
 #define FRICTION_ITERATIONS 4 // original: 4x Contact_solveIter per pair
 
 // world walls are the hidden "World" toy's 4 anchored limbs
@@ -34,23 +36,99 @@ typedef struct {
     int b1, b2;
     float o1, o2;  // reference orientations from the def
     float rest, k, c;
+    bool active;
 } rotjoint_t;
 
 typedef struct {
     int b1, b2;
     float a1x, a1y, a2x, a2y; // body-local anchors
     float rest, k, c;
+    bool active;
 } joint_t;
+
+// RK4 stage state of one body (see the integrator section below).
+typedef struct {
+    float px, py, theta;
+    float mx, my, L;
+} bstate_t;
 
 static struct {
     float ww, wh; // wall extents
-    body_t bodies[MAX_BODIES];
-    int nbodies;
-    joint_t joints[MAX_JOINTS];
-    int njoints;
-    rotjoint_t rotjoints[MAX_JOINTS];
-    int nrotjoints;
+    body_t* bodies;
+    int nbodies, body_cap;
+    joint_t* joints;
+    int njoints, joint_cap;
+    rotjoint_t* rotjoints;
+    int nrotjoints, rotjoint_cap;
+    bstate_t* rk_y;
+    bstate_t* rk_k[4];
 } P;
+
+static int grown_capacity(int current, int wanted, int initial) {
+    int cap = current ? current : initial;
+    while (cap < wanted) {
+        if (cap > INT_MAX / 2) return 0;
+        cap *= 2;
+    }
+    return cap;
+}
+
+static bool reserve_bodies(int wanted) {
+    if (wanted <= P.body_cap) return true;
+    const int cap = grown_capacity(P.body_cap, wanted, INITIAL_BODY_CAP);
+    if (!cap) return false;
+
+    body_t* bodies = calloc((size_t)cap, sizeof(*bodies));
+    bstate_t* y = calloc((size_t)cap, sizeof(*y));
+    bstate_t* k[4] = {0};
+    for (int stage = 0; stage < 4; stage++) {
+        k[stage] = calloc((size_t)cap, sizeof(*k[stage]));
+    }
+    if (!bodies || !y || !k[0] || !k[1] || !k[2] || !k[3]) {
+        free(bodies);
+        free(y);
+        for (int stage = 0; stage < 4; stage++) free(k[stage]);
+        return false;
+    }
+    if (P.nbodies > 0) {
+        memcpy(bodies, P.bodies, (size_t)P.nbodies * sizeof(*bodies));
+        memcpy(y, P.rk_y, (size_t)P.nbodies * sizeof(*y));
+        for (int stage = 0; stage < 4; stage++) {
+            memcpy(k[stage], P.rk_k[stage],
+                   (size_t)P.nbodies * sizeof(*k[stage]));
+        }
+    }
+    free(P.bodies);
+    free(P.rk_y);
+    for (int stage = 0; stage < 4; stage++) free(P.rk_k[stage]);
+    P.bodies = bodies;
+    P.rk_y = y;
+    for (int stage = 0; stage < 4; stage++) P.rk_k[stage] = k[stage];
+    P.body_cap = cap;
+    return true;
+}
+
+static bool reserve_joints(int wanted) {
+    if (wanted <= P.joint_cap) return true;
+    const int cap = grown_capacity(P.joint_cap, wanted, INITIAL_JOINT_CAP);
+    if (!cap) return false;
+    joint_t* joints = realloc(P.joints, (size_t)cap * sizeof(*joints));
+    if (!joints) return false;
+    P.joints = joints;
+    P.joint_cap = cap;
+    return true;
+}
+
+static bool reserve_rotjoints(int wanted) {
+    if (wanted <= P.rotjoint_cap) return true;
+    const int cap = grown_capacity(P.rotjoint_cap, wanted, INITIAL_JOINT_CAP);
+    if (!cap) return false;
+    rotjoint_t* joints = realloc(P.rotjoints, (size_t)cap * sizeof(*joints));
+    if (!joints) return false;
+    P.rotjoints = joints;
+    P.rotjoint_cap = cap;
+    return true;
+}
 
 // classic RK4 stage time offsets, rk4_stage_coeffs @0x6D6BA0
 static const float rk4_coeffs[4] = { 0.0f, 0.5f, 0.5f, 1.0f };
@@ -64,6 +142,44 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
                   const phys_point* pts, int npts,
                   const phys_shape* shapes, int nshapes,
                   float fallback_radius) {
+    phys_point* owned_pts = NULL;
+    phys_shape* owned_shapes = NULL;
+    int owned_npts = npts;
+    int owned_nshapes = nshapes;
+    if (npts > 0 || nshapes > 0) {
+        if (npts > 0) {
+            owned_pts = malloc((size_t)npts * sizeof(*owned_pts));
+        }
+        if (nshapes > 0) {
+            owned_shapes = malloc((size_t)nshapes * sizeof(*owned_shapes));
+        }
+        if ((npts > 0 && !owned_pts) || (nshapes > 0 && !owned_shapes)) {
+            free(owned_pts);
+            free(owned_shapes);
+            return -1;
+        }
+        if (npts > 0) memcpy(owned_pts, pts, (size_t)npts * sizeof(*owned_pts));
+        if (nshapes > 0) {
+            memcpy(owned_shapes, shapes, (size_t)nshapes * sizeof(*owned_shapes));
+        }
+    } else {
+        owned_npts = owned_nshapes = 1;
+        owned_pts = malloc(sizeof(*owned_pts));
+        owned_shapes = malloc(sizeof(*owned_shapes));
+        if (!owned_pts || !owned_shapes) {
+            free(owned_pts);
+            free(owned_shapes);
+            return -1;
+        }
+        owned_pts[0] = (phys_point){ 0, 0, fallback_radius };
+        owned_shapes[0] = (phys_shape){
+            0, 1,
+            PHYS_GROUP_LEFT_WALL_REPEL | PHYS_GROUP_LEFT_WALL_ROTATE
+              | PHYS_GROUP_RIGHT_WALL_REPEL | PHYS_GROUP_RIGHT_WALL_ROTATE
+              | PHYS_GROUP_FLOOR_REPEL | PHYS_GROUP_FLOOR_ROTATE
+              | PHYS_GROUP_CEILING_REPEL | PHYS_GROUP_CEILING_ROTATE
+        };
+    }
     int slot = -1;
     for (int i = 0; i < P.nbodies; i++) {
         if (P.bodies[i].dead) {
@@ -72,7 +188,9 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
         }
     }
     if (slot < 0) {
-        if (P.nbodies >= MAX_BODIES) {
+        if (!reserve_bodies(P.nbodies + 1)) {
+            free(owned_pts);
+            free(owned_shapes);
             return -1;
         }
         slot = P.nbodies++;
@@ -85,31 +203,10 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
     b->my = 0;
     b->theta = theta;
     b->L = 0;
-    if (npts > 0 || nshapes > 0) {
-        b->npts = npts;
-        b->pts = npts > 0 ? malloc((size_t)npts * sizeof(phys_point)) : NULL;
-        for (int i = 0; i < npts; i++) {
-            b->pts[i] = pts[i];
-        }
-        b->nshapes = nshapes;
-        b->shapes = malloc((size_t)nshapes * sizeof(phys_shape));
-        for (int i = 0; i < nshapes; i++) {
-            b->shapes[i] = shapes[i];
-        }
-    } else {
-        b->npts = 1;
-        b->pts = malloc(sizeof(phys_point));
-        b->pts[0] = (phys_point){ 0, 0, fallback_radius };
-        b->nshapes = 1;
-        b->shapes = malloc(sizeof(phys_shape));
-        b->shapes[0] = (phys_shape){
-            0, 1,
-            PHYS_GROUP_LEFT_WALL_REPEL | PHYS_GROUP_LEFT_WALL_ROTATE
-              | PHYS_GROUP_RIGHT_WALL_REPEL | PHYS_GROUP_RIGHT_WALL_ROTATE
-              | PHYS_GROUP_FLOOR_REPEL | PHYS_GROUP_FLOOR_ROTATE
-              | PHYS_GROUP_CEILING_REPEL | PHYS_GROUP_CEILING_ROTATE
-        };
-    }
+    b->npts = owned_npts;
+    b->pts = owned_pts;
+    b->nshapes = owned_nshapes;
+    b->shapes = owned_shapes;
     b->prm = *p;
     b->grabbed = false;
     return slot;
@@ -118,32 +215,41 @@ int phys_body_add(float x, float y, float theta, const phys_params* p,
 int phys_joint_add(int body1, float a1x, float a1y,
                    int body2, float a2x, float a2y,
                    float rest_length, float stiffness, float dampener) {
-    if (P.njoints >= MAX_JOINTS || body1 < 0 || body2 < 0) {
-        return -1;
+    if (body1 < 0 || body2 < 0) return -1;
+    int slot = -1;
+    for (int i = 0; i < P.njoints; i++) {
+        if (!P.joints[i].active) {
+            slot = i;
+            break;
+        }
     }
-    P.joints[P.njoints] = (joint_t){ body1, body2, a1x, a1y, a2x, a2y,
-                                     rest_length, stiffness, dampener };
-    return P.njoints++;
+    if (slot < 0) {
+        if (!reserve_joints(P.njoints + 1)) return -1;
+        slot = P.njoints++;
+    }
+    P.joints[slot] = (joint_t){ body1, body2, a1x, a1y, a2x, a2y,
+                                rest_length, stiffness, dampener, true };
+    return slot;
 }
 
 int phys_rotjoint_add(int body1, float o1, int body2, float o2,
                       float rest, float stiffness, float dampener) {
-    if (P.nrotjoints >= MAX_JOINTS || body1 < 0 || body2 < 0) {
-        return -1;
+    if (body1 < 0 || body2 < 0) return -1;
+    int slot = -1;
+    for (int i = 0; i < P.nrotjoints; i++) {
+        if (!P.rotjoints[i].active) {
+            slot = i;
+            break;
+        }
     }
-    P.rotjoints[P.nrotjoints] = (rotjoint_t){ body1, body2, o1, o2,
-                                              rest, stiffness, dampener };
-    return P.nrotjoints++;
+    if (slot < 0) {
+        if (!reserve_rotjoints(P.nrotjoints + 1)) return -1;
+        slot = P.nrotjoints++;
+    }
+    P.rotjoints[slot] = (rotjoint_t){ body1, body2, o1, o2,
+                                      rest, stiffness, dampener, true };
+    return slot;
 }
-
-// RK4 stage state of one body (see the integrator section below)
-typedef struct {
-    float px, py, theta;
-    float mx, my, L;
-} bstate_t;
-
-static bstate_t rk_y[MAX_BODIES];    // stage state
-static bstate_t rk_k[4][MAX_BODIES]; // stage derivatives
 
 // One single-body contact constraint. n points away from the other shape;
 // (vx,vy) is this contact point's velocity relative to the other body.
@@ -459,7 +565,7 @@ static void derive_toy_contacts(int ai, const bstate_t* sa, bstate_t* d) {
     for (int bi = 0; bi < P.nbodies; bi++) {
         const body_t* b = &P.bodies[bi];
         if (bodies_filtered(a, b)) continue;
-        const int n = pair_contacts(a, sa, b, &rk_y[bi], contacts,
+        const int n = pair_contacts(a, sa, b, &P.rk_y[bi], contacts,
                                     MAX_PAIR_CONTACTS);
         for (int i = 0; i < n; i++) {
             const contact_t* ct = &contacts[i];
@@ -586,11 +692,11 @@ static void force_at(bstate_t* d, const bstate_t* s, const body_t* b,
     }
 }
 
-// derivative of the whole system at stage state rk_y -> out
+// derivative of the whole system at stage state P.rk_y -> out
 static void derive(bstate_t* out) {
     for (int i = 0; i < P.nbodies; i++) {
         const body_t* b = &P.bodies[i];
-        const bstate_t* s = &rk_y[i];
+        const bstate_t* s = &P.rk_y[i];
         bstate_t* d = &out[i];
         *d = (bstate_t){ 0 };
         if (b->prm.anchored) { // fixedMove: no motion at all (original +201 flag)
@@ -654,11 +760,14 @@ static void derive(bstate_t* out) {
     // anchors (torque from the offset)
     for (int i = 0; i < P.njoints; i++) {
         const joint_t* j = &P.joints[i];
+        if (!j->active) continue;
         const body_t* b1 = &P.bodies[j->b1];
         const body_t* b2 = &P.bodies[j->b2];
         float p1x, p1y, v1x, v1y, p2x, p2y, v2x, v2y;
-        anchor_state(&rk_y[j->b1], b1, j->a1x, j->a1y, &p1x, &p1y, &v1x, &v1y);
-        anchor_state(&rk_y[j->b2], b2, j->a2x, j->a2y, &p2x, &p2y, &v2x, &v2y);
+        anchor_state(&P.rk_y[j->b1], b1, j->a1x, j->a1y,
+                     &p1x, &p1y, &v1x, &v1y);
+        anchor_state(&P.rk_y[j->b2], b2, j->a2x, j->a2y,
+                     &p2x, &p2y, &v2x, &v2y);
         float dx = p2x - p1x, dy = p2y - p1y;
         if (j->rest != 0.0f) {
             const float dist = sqrtf(dx * dx + dy * dy);
@@ -670,8 +779,10 @@ static void derive(bstate_t* out) {
         }
         const float fx = j->k * dx - j->c * (v1x - v2x);
         const float fy = j->k * dy - j->c * (v1y - v2y);
-        force_at(&out[j->b1], &rk_y[j->b1], b1, j->a1x, j->a1y, fx, fy);
-        force_at(&out[j->b2], &rk_y[j->b2], b2, j->a2x, j->a2y, -fx, -fy);
+        force_at(&out[j->b1], &P.rk_y[j->b1], b1,
+                 j->a1x, j->a1y, fx, fy);
+        force_at(&out[j->b2], &P.rk_y[j->b2], b2,
+                 j->a2x, j->a2y, -fx, -fy);
     }
 
     // rotational joints: torque spring on the relative orientation
@@ -680,14 +791,15 @@ static void derive(bstate_t* out) {
     // [rest, stiffness, dampener] - see schema TODO.
     for (int i = 0; i < P.nrotjoints; i++) {
         const rotjoint_t* rj = &P.rotjoints[i];
+        if (!rj->active) continue;
         const body_t* b1 = &P.bodies[rj->b1];
         const body_t* b2 = &P.bodies[rj->b2];
         const float w1 = (!b1->prm.fixed_rotate && b1->prm.inertia > 0)
-                             ? rk_y[rj->b1].L / b1->prm.inertia : 0.0f;
+                             ? P.rk_y[rj->b1].L / b1->prm.inertia : 0.0f;
         const float w2 = (!b2->prm.fixed_rotate && b2->prm.inertia > 0)
-                             ? rk_y[rj->b2].L / b2->prm.inertia : 0.0f;
-        const float rel = (rk_y[rj->b1].theta - rj->o1)
-                        - (rk_y[rj->b2].theta - rj->o2);
+                             ? P.rk_y[rj->b2].L / b2->prm.inertia : 0.0f;
+        const float rel = (P.rk_y[rj->b1].theta - rj->o1)
+                        - (P.rk_y[rj->b2].theta - rj->o2);
         const float tau = -rj->k * (rel - rj->rest) - rj->c * (w1 - w2);
         if (!b1->prm.anchored && !b1->prm.fixed_rotate) {
             out[rj->b1].L += tau;
@@ -706,7 +818,7 @@ static void step_once(void) {
             bstate_t y = { b->px, b->py, b->theta, b->mx, b->my, b->L };
             if (stage > 0) {
                 const float h = rk4_coeffs[stage] * PHYS_DT;
-                const bstate_t* k = &rk_k[stage - 1][i];
+                const bstate_t* k = &P.rk_k[stage - 1][i];
                 y.px += h * k->px;
                 y.py += h * k->py;
                 y.theta += h * k->theta;
@@ -714,19 +826,19 @@ static void step_once(void) {
                 y.my += h * k->my;
                 y.L += h * k->L;
             }
-            rk_y[i] = y;
+            P.rk_y[i] = y;
         }
-        derive(rk_k[stage]);
+        derive(P.rk_k[stage]);
     }
     for (int i = 0; i < P.nbodies; i++) {
         body_t* b = &P.bodies[i];
         if (b->prm.anchored) {
             continue;
         }
-        const bstate_t* k1 = &rk_k[0][i];
-        const bstate_t* k2 = &rk_k[1][i];
-        const bstate_t* k3 = &rk_k[2][i];
-        const bstate_t* k4 = &rk_k[3][i];
+        const bstate_t* k1 = &P.rk_k[0][i];
+        const bstate_t* k2 = &P.rk_k[1][i];
+        const bstate_t* k3 = &P.rk_k[2][i];
+        const bstate_t* k4 = &P.rk_k[3][i];
         const float h = PHYS_DT / 6.0f;
         b->px += h * (k1->px + 2 * k2->px + 2 * k3->px + k4->px);
         b->py += h * (k1->py + 2 * k2->py + 2 * k3->py + k4->py);
@@ -744,6 +856,14 @@ void phys_steps(int n) {
     for (int i = 0; i < n; i++) {
         step_once();
     }
+}
+
+int phys_active_body_count(void) {
+    int count = 0;
+    for (int i = 0; i < P.nbodies; i++) {
+        if (!P.bodies[i].dead) count++;
+    }
+    return count;
 }
 
 static int wall_from_groups(uint32_t groups) {
@@ -853,16 +973,14 @@ void phys_body_free(int body) {
     b->nshapes = 0;
     for (int i = 0; i < P.njoints; i++) {
         joint_t* j = &P.joints[i];
-        if (j->b1 == body || j->b2 == body) {
-            j->k = 0; // neutralized; joint slots are not reused yet
-            j->c = 0;
+        if (j->active && (j->b1 == body || j->b2 == body)) {
+            j->active = false;
         }
     }
     for (int i = 0; i < P.nrotjoints; i++) {
         rotjoint_t* rj = &P.rotjoints[i];
-        if (rj->b1 == body || rj->b2 == body) {
-            rj->k = 0;
-            rj->c = 0;
+        if (rj->active && (rj->b1 == body || rj->b2 == body)) {
+            rj->active = false;
         }
     }
 }

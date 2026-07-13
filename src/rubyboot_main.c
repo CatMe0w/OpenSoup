@@ -3,11 +3,30 @@
 #include "rubyhost.h"
 #include "assets.h"
 #include "audio.h"
+#include "physics.h"
 #include "toydefs.h"
 #include "toybox_scroll.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+static int fake_sprite_next;
+static int fake_sprite_limit;
+static int fake_sprite_created;
+static int fake_sprite_removed;
+
+static int fake_sprite_add(const char* image, int body, float com_x,
+                           float com_y, int group, void* user) {
+    (void)image; (void)body; (void)com_x; (void)com_y; (void)group; (void)user;
+    if (fake_sprite_created >= fake_sprite_limit) return -1;
+    fake_sprite_created++;
+    return fake_sprite_next++;
+}
+
+static void fake_sprite_remove(int sprite, void* user) {
+    (void)sprite; (void)user;
+    fake_sprite_removed++;
+}
 
 int main(int argc, char** argv) {
     const char* assets = argc > 1 ? argv[1] : "private/extracted";
@@ -499,6 +518,77 @@ int main(int argc, char** argv) {
             "$default_engine.toys.remove(ball)\n"
             "$default_engine.toys.remove(hoop)\n",
             "hoop trigger verification");
+    }
+
+    // Capacity regression: twenty six-limb bears exceed both former global
+    // ceilings at once (64 bodies and 128 joints). No simulation step is
+    // needed here; successful all-or-nothing realization is the contract.
+    if (ok) {
+        const int bodies_before = phys_active_body_count();
+        ok = rbh_eval(
+            "$capacity_bears = []\n"
+            "20.times do |i|\n"
+            "  t = U6Bluebear.new\n"
+            "  t.move(Vector[2.0 + (i % 10) * 0.1, 5.0 + (i / 10) * 0.1])\n"
+            "  $default_engine.toys << t\n"
+            "  $capacity_bears << t\n"
+            "end\n",
+            "dynamic physics capacity verification");
+        const int added = phys_active_body_count() - bodies_before;
+        if (ok && added != 120) {
+            fprintf(stderr, "rubyboot: dynamic body growth added %d, expected 120\n",
+                    added);
+            ok = false;
+        }
+        if (ok) {
+            ok = rbh_eval(
+                "$capacity_bears.each {|t| $default_engine.toys.remove(t)}\n"
+                "$capacity_bears = nil\n",
+                "dynamic physics capacity teardown");
+        }
+        if (ok && phys_active_body_count() != bodies_before) {
+            fprintf(stderr, "rubyboot: capacity teardown leaked bodies\n");
+            ok = false;
+        }
+        if (ok) {
+            fprintf(stderr,
+                    "rubyboot: dynamic capacity 120 bodies / 220 joints\n");
+        }
+    }
+
+    // A visual allocation failure after a prefix of a complex toy must make
+    // rbh_spawn_toy fail and tear the prefix back down. Starting above the
+    // old 1024-id map limit also exercises dynamic scene-id bookkeeping.
+    if (ok) {
+        const int bodies_before = phys_active_body_count();
+        fake_sprite_next = 1500;
+        fake_sprite_limit = 2;
+        fake_sprite_created = fake_sprite_removed = 0;
+        rbh_set_sprite_hook(fake_sprite_add, fake_sprite_remove, NULL);
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        if (rbh_spawn_toy("U6Bluebear", dir, 6.0, 5.0)) {
+            fprintf(stderr, "rubyboot: partial visual realization succeeded\n");
+            ok = false;
+        }
+        rbh_set_sprite_hook(NULL, NULL, NULL);
+        if (phys_active_body_count() != bodies_before
+            || fake_sprite_created != 2 || fake_sprite_removed != 2) {
+            fprintf(stderr,
+                    "rubyboot: realization rollback bodies=%d sprites=%d/%d\n",
+                    phys_active_body_count() - bodies_before,
+                    fake_sprite_removed, fake_sprite_created);
+            ok = false;
+        }
+        if (ok) {
+            ok = rbh_eval(
+                "bears = $default_engine.toys.select {|t| t.toy_id == 'U6Bluebear'}\n"
+                "raise 'failed bear remained in engine' unless bears.size == 1\n",
+                "transactional realization verification");
+        }
+        if (ok) {
+            fprintf(stderr, "rubyboot: partial realization rolled back\n");
+        }
     }
 
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");

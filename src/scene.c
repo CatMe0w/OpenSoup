@@ -1,10 +1,21 @@
 #include "scene.h"
 #include "physics.h"
 #include "sokol_log.h"
+#include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 
-#define MAX_SPRITES 256
 #define MAX_FRAMES 256
+
+typedef struct texture_t {
+    int w, h;
+    int nframes;
+    int refs;
+    uint8_t* const* pixels; // identity key + borrowed alpha hit-test data
+    sg_view views[MAX_FRAMES];
+    sg_image imgs[MAX_FRAMES];
+    struct texture_t* next;
+} texture_t;
 
 typedef struct {
     int id;     // stable handle handed to callers; draw order reorders freely
@@ -15,9 +26,7 @@ typedef struct {
     int frame;
     int speed_ms;
     double acc_ms;
-    sg_view views[MAX_FRAMES];
-    sg_image imgs[MAX_FRAMES]; // kept for teardown
-    uint8_t* const* pixels; // borrowed premultiplied RGBA, for alpha hit-test
+    texture_t* texture;    // shared by every instance of the same decoded asset
     int body;               // physics body index or -1
     float ax, ay;           // body origin in canvas px relative to centre, y-down
     int group;              // toy group; grabbed together, raised together
@@ -43,11 +52,101 @@ static struct {
     sg_pipeline pip;
     sg_buffer quad;
     sg_sampler smp;
-    sprite_t sprites[MAX_SPRITES];
+    sprite_t* sprites;
     int nsprites;
+    int sprite_cap;
     int next_id;
+    texture_t* textures;
     float view_h;       // device px, for world<->view y flip
 } state;
+
+static bool grow_sprites(int wanted) {
+    if (wanted <= state.sprite_cap) {
+        return true;
+    }
+    int cap = state.sprite_cap ? state.sprite_cap : 256;
+    while (cap < wanted) {
+        if (cap > INT_MAX / 2) {
+            return false;
+        }
+        cap *= 2;
+    }
+    sprite_t* sprites = realloc(state.sprites, (size_t)cap * sizeof(*sprites));
+    if (!sprites) {
+        return false;
+    }
+    state.sprites = sprites;
+    state.sprite_cap = cap;
+    return true;
+}
+
+static texture_t* texture_acquire(int w, int h, int nframes,
+                                  uint8_t* const* frames) {
+    for (texture_t* t = state.textures; t; t = t->next) {
+        if (t->w == w && t->h == h && t->nframes == nframes
+            && t->pixels == frames) {
+            t->refs++;
+            return t;
+        }
+    }
+    texture_t* t = calloc(1, sizeof(*t));
+    if (!t) {
+        return NULL;
+    }
+    t->w = w;
+    t->h = h;
+    t->nframes = nframes;
+    t->refs = 1;
+    t->pixels = frames;
+    for (int f = 0; f < nframes; f++) {
+        t->imgs[f] = sg_make_image(&(sg_image_desc){
+            .width = w,
+            .height = h,
+            .pixel_format = SG_PIXELFORMAT_RGBA8,
+            .data.mip_levels[0] = {
+                .ptr = frames[f], .size = (size_t)w * h * 4
+            },
+        });
+        if (sg_query_image_state(t->imgs[f]) != SG_RESOURCESTATE_VALID) {
+            goto fail;
+        }
+        t->views[f] = sg_make_view(&(sg_view_desc){
+            .texture.image = t->imgs[f],
+        });
+        if (sg_query_view_state(t->views[f]) != SG_RESOURCESTATE_VALID) {
+            goto fail;
+        }
+    }
+    t->next = state.textures;
+    state.textures = t;
+    return t;
+
+fail:
+    for (int f = 0; f < nframes; f++) {
+        if (t->views[f].id != SG_INVALID_ID) sg_destroy_view(t->views[f]);
+        if (t->imgs[f].id != SG_INVALID_ID) sg_destroy_image(t->imgs[f]);
+    }
+    free(t);
+    return NULL;
+}
+
+static void texture_release(texture_t* t) {
+    if (!t || --t->refs > 0) {
+        return;
+    }
+    texture_t** link = &state.textures;
+    while (*link && *link != t) {
+        link = &(*link)->next;
+    }
+    if (*link == t) {
+        *link = t->next;
+    }
+    for (int f = 0; f < t->nframes; f++) {
+        sg_destroy_view(t->views[f]);
+        sg_destroy_image(t->imgs[f]);
+    }
+    free(t);
+}
 
 static sprite_t* by_id(int id) {
     for (int i = 0; i < state.nsprites; i++) {
@@ -80,8 +179,10 @@ void scene_setup(const sg_environment* env) {
         .logger.func = slog_func,
         // one image+view per animation frame for now; a texture atlas can
         // shrink this later
-        .image_pool_size = 4096,
-        .view_pool_size = 4096,
+        // Instances share textures; these pools bound distinct decoded asset
+        // frames rather than the number of toys on screen.
+        .image_pool_size = 16384,
+        .view_pool_size = 16384,
     });
     // unit quad, expanded to pixel rects in the vertex shader
     const float corners[] = { 0, 0, 1, 0, 0, 1, 1, 1 };
@@ -164,7 +265,12 @@ void scene_setup(const sg_environment* env) {
 
 int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
                      int speed_ms, float x_px, float y_px, int group) {
-    if (state.nsprites >= MAX_SPRITES || nframes < 1 || nframes > MAX_FRAMES) {
+    if (nframes < 1 || nframes > MAX_FRAMES || !frames
+        || !grow_sprites(state.nsprites + 1)) {
+        return -1;
+    }
+    texture_t* texture = texture_acquire(w, h, nframes, frames);
+    if (!texture) {
         return -1;
     }
     sprite_t* s = &state.sprites[state.nsprites++];
@@ -179,7 +285,7 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->frame = 0;
     s->speed_ms = speed_ms;
     s->acc_ms = 0;
-    s->pixels = frames;
+    s->texture = texture;
     s->body = -1;
     s->ax = 0;
     s->ay = 0;
@@ -191,17 +297,6 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->visible = true;
     s->animate = true;
     s->clip_enabled = false;
-    for (int f = 0; f < nframes; f++) {
-        s->imgs[f] = sg_make_image(&(sg_image_desc){
-            .width = w,
-            .height = h,
-            .pixel_format = SG_PIXELFORMAT_RGBA8,
-            .data.mip_levels[0] = { .ptr = frames[f], .size = (size_t)w * h * 4 },
-        });
-        s->views[f] = sg_make_view(&(sg_view_desc){
-            .texture.image = s->imgs[f],
-        });
-    }
     const int id = s->id;
     // New world sprites may be created after the Toybox. Keep layers sorted
     // so default layer 0 is inserted below any existing UI layer.
@@ -318,10 +413,7 @@ void scene_sprite_remove(int sprite) {
     if (!s) {
         return;
     }
-    for (int f = 0; f < s->nframes; f++) {
-        sg_destroy_view(s->views[f]);
-        sg_destroy_image(s->imgs[f]);
-    }
+    texture_release(s->texture);
     const int idx = (int)(s - state.sprites);
     for (int k = idx; k < state.nsprites - 1; k++) {
         state.sprites[k] = state.sprites[k + 1];
@@ -383,7 +475,7 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
         };
         sg_apply_bindings(&(sg_bindings){
             .vertex_buffers[0] = state.quad,
-            .views[0] = s->views[s->frame],
+            .views[0] = s->texture->views[s->frame],
             .samplers[0] = state.smp,
         });
         sg_apply_uniforms(0, &SG_RANGE(params));
@@ -394,6 +486,12 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
 }
 
 void scene_shutdown(void) {
+    while (state.nsprites > 0) {
+        scene_sprite_remove(state.sprites[state.nsprites - 1].id);
+    }
+    free(state.sprites);
+    state.sprites = NULL;
+    state.sprite_cap = 0;
     sg_shutdown();
 }
 
@@ -420,7 +518,8 @@ static int sprite_at(float x, float y) {
         int ly = (int)(dy * (float)s->h * s->uv_scale[1] / s->draw_h);
         lx %= s->w;
         ly %= s->h;
-        if (s->pixels[s->frame][((size_t)ly * s->w + lx) * 4 + 3] > 0) {
+        if (s->texture->pixels[s->frame]
+                [((size_t)ly * s->w + lx) * 4 + 3] > 0) {
             return i;
         }
     }
@@ -443,7 +542,10 @@ void scene_raise(int sprite) {
     }
     const int group = hit->group;
     const int layer = hit->layer;
-    sprite_t reordered[MAX_SPRITES];
+    sprite_t* reordered = malloc((size_t)state.nsprites * sizeof(*reordered));
+    if (!reordered) {
+        return;
+    }
     int n = 0;
     for (int k = 0; k < state.nsprites; k++) {
         if (state.sprites[k].layer < layer) {
@@ -468,4 +570,5 @@ void scene_raise(int sprite) {
     for (int k = 0; k < n; k++) {
         state.sprites[k] = reordered[k];
     }
+    free(reordered);
 }

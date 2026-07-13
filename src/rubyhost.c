@@ -10,6 +10,7 @@
 #include "toyphys.h"
 #include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -155,10 +156,29 @@ static void vec_get(VALUE v, double* x, double* y) {
 static rbh_sprite_fn g_sprite_fn;
 static void* g_sprite_user;
 
-// scene sprite id -> Ruby Sprite node (nodes stay reachable via the toy
-// tree; entries go stale only on toy removal, which has no teardown yet)
-#define MAX_SCENE_SPRITES 1024
-static VALUE g_scene_sprite[MAX_SCENE_SPRITES];
+// scene sprite id -> Ruby Sprite node. Scene ids are stable and monotonic, so
+// this side table grows with the largest issued id instead of imposing a
+// second unrelated sprite ceiling.
+static VALUE* g_scene_sprite;
+static size_t g_scene_sprite_cap;
+
+static bool scene_sprite_map_reserve(int id) {
+    if (id < 0) return false;
+    const size_t wanted = (size_t)id + 1;
+    if (wanted <= g_scene_sprite_cap) return true;
+    size_t cap = g_scene_sprite_cap ? g_scene_sprite_cap : 1024;
+    while (cap < wanted) {
+        if (cap > SIZE_MAX / 2) return false;
+        cap *= 2;
+    }
+    VALUE* entries = realloc(g_scene_sprite, cap * sizeof(*entries));
+    if (!entries) return false;
+    memset(entries + g_scene_sprite_cap, 0,
+           (cap - g_scene_sprite_cap) * sizeof(*entries));
+    g_scene_sprite = entries;
+    g_scene_sprite_cap = cap;
+    return true;
+}
 
 static rbh_sprite_remove_fn g_sprite_remove_fn;
 
@@ -172,12 +192,12 @@ void rbh_set_sprite_hook(rbh_sprite_fn fn, rbh_sprite_remove_fn remove_fn,
 // Entering the default engine makes a toy physical: one phys body per limb
 // (at the limb's CURRENT position, so pre-add Toy#move works), the def's
 // spring joints, and the visuals via the app's sprite hook, back-to-front
-// by zOrder (smaller = nearer the viewer). No teardown yet: bodies outlive
-// removal until phys grows a free list.
-static void toy_realize(VALUE toyv) {
+// by zOrder (smaller = nearer the viewer). Every allocation is checked; the
+// caller reverses the engine transition if any prefix cannot be realized.
+static bool toy_realize(VALUE toyv) {
     sn_t* t = sn_get(toyv);
     if (t->realized || !t->def) {
-        return;
+        return true;
     }
     t->realized = 1;
     const float S = (float)t->def->base_scale;
@@ -190,6 +210,11 @@ static void toy_realize(VALUE toyv) {
                                              (float)ln->py,
                                              (float)ln->orient, S,
                                              t->instance_id);
+            if (ln->body < 0) {
+                fprintf(stderr, "rubyhost: cannot allocate body for %s/%s\n",
+                        t->def->class_name, ln->ldef->name);
+                return false;
+            }
             if (ln->body >= 0 && (ln->mx || ln->my || ln->mL)) {
                 phys_body_set_momentum(ln->body, (float)ln->mx, (float)ln->my,
                                        (float)ln->mL);
@@ -209,9 +234,14 @@ static void toy_realize(VALUE toyv) {
         if (b1 < 0 || b2 < 0) {
             continue;
         }
-        phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
-                       b2, j->anchor2[0] * S, j->anchor2[1] * S,
-                       j->rest_length * S, j->stiffness, j->dampener);
+        if (phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
+                           b2, j->anchor2[0] * S, j->anchor2[1] * S,
+                           j->rest_length * S, j->stiffness,
+                           j->dampener) < 0) {
+            fprintf(stderr, "rubyhost: cannot allocate joint for %s\n",
+                    t->def->class_name);
+            return false;
+        }
     }
 
     for (int i = 0; i < t->def->nrotjoints; i++) {
@@ -222,20 +252,35 @@ static void toy_realize(VALUE toyv) {
         const int b1 = sn_get(rb_ary_entry(limbs, r->limb1))->body;
         const int b2 = sn_get(rb_ary_entry(limbs, r->limb2))->body;
         if (b1 >= 0 && b2 >= 0) {
-            phys_rotjoint_add(b1, r->orientation1, b2, r->orientation2,
-                              r->rest, r->stiffness, r->dampener);
+            if (phys_rotjoint_add(b1, r->orientation1, b2, r->orientation2,
+                                  r->rest, r->stiffness, r->dampener) < 0) {
+                fprintf(stderr,
+                        "rubyhost: cannot allocate rotational joint for %s\n",
+                        t->def->class_name);
+                return false;
+            }
         }
     }
 
     if (!g_sprite_fn) {
-        return; // headless: physics only
+        return true; // headless: physics only
     }
-    struct { const td_sprite* sp; int body; VALUE node; } vis[128];
+    long vis_cap = 0;
+    for (long i = 0; i < RARRAY(limbs)->len; i++) {
+        VALUE sprites = sn_get(sn_get(rb_ary_entry(limbs, i))->colls[0])->items;
+        vis_cap += RARRAY(sprites)->len;
+    }
+    struct visual { const td_sprite* sp; int body; VALUE node; };
+    struct visual* vis = vis_cap > 0
+        ? malloc((size_t)vis_cap * sizeof(*vis)) : NULL;
+    if (vis_cap > 0 && !vis) {
+        return false;
+    }
     int nvis = 0;
-    for (long i = 0; i < RARRAY(limbs)->len && nvis < 128; i++) {
+    for (long i = 0; i < RARRAY(limbs)->len; i++) {
         sn_t* ln = sn_get(rb_ary_entry(limbs, i));
         VALUE sprites = sn_get(ln->colls[0])->items;
-        for (long s = 0; s < RARRAY(sprites)->len && nvis < 128; s++) {
+        for (long s = 0; s < RARRAY(sprites)->len; s++) {
             VALUE node = rb_ary_entry(sprites, s);
             const td_sprite* sp = sn_get(node)->spdef;
             if (sp && sp->image) {
@@ -265,11 +310,19 @@ static void toy_realize(VALUE toyv) {
         const int id = g_sprite_fn(vis[i].sp->image, vis[i].body,
                                    vis[i].sp->com[0], vis[i].sp->com[1],
                                    t->instance_id, g_sprite_user);
-        if (id >= 0 && id < MAX_SCENE_SPRITES) {
-            g_scene_sprite[id] = vis[i].node;
-            sn_get(vis[i].node)->body = id; // sprite node: scene sprite id
+        if (id < 0) {
+            free(vis);
+            return false;
         }
+        sn_get(vis[i].node)->body = id; // ensures rollback can remove it
+        if (!scene_sprite_map_reserve(id)) {
+            free(vis);
+            return false;
+        }
+        g_scene_sprite[id] = vis[i].node;
     }
+    free(vis);
+    return true;
 }
 
 // Leaving the engine tears the toy back down: phys bodies freed (joints on
@@ -304,7 +357,7 @@ static void toy_unrealize(VALUE toyv) {
                 if (g_sprite_remove_fn) {
                     g_sprite_remove_fn(spn->body, g_sprite_user);
                 }
-                if (spn->body < MAX_SCENE_SPRITES) {
+                if ((size_t)spn->body < g_scene_sprite_cap) {
                     g_scene_sprite[spn->body] = 0;
                 }
                 spn->body = -1;
@@ -316,10 +369,10 @@ static void toy_unrealize(VALUE toyv) {
 // Setting a node's engine recurses into children, then fires the
 // SoupNode#engine_changed(old, new) callback the framework relies on to
 // (de)register key/timer handlers (World hooks walls_changed here).
-static void sn_set_engine(VALUE nodev, VALUE eng) {
+static bool sn_set_engine(VALUE nodev, VALUE eng) {
     sn_t* n = sn_get(nodev);
     if (n->engine == eng) {
-        return;
+        return true;
     }
     VALUE old = n->engine;
     n->engine = eng;
@@ -331,22 +384,36 @@ static void sn_set_engine(VALUE nodev, VALUE eng) {
     }
     if (!NIL_P(n->items)) {
         for (long i = 0; i < RARRAY(n->items)->len; i++) {
-            sn_set_engine(rb_ary_entry(n->items, i), eng);
+            if (!sn_set_engine(rb_ary_entry(n->items, i), eng)) goto fail;
         }
     }
     for (int i = 0; i < SN_NCOLLS; i++) {
         if (!NIL_P(n->colls[i])) {
-            sn_set_engine(n->colls[i], eng);
+            if (!sn_set_engine(n->colls[i], eng)) goto fail;
         }
     }
     if (n->kind == SN_TOY) {
         if (!NIL_P(eng) && eng == rb_gv_get("$default_engine")) {
-            toy_realize(nodev);
+            if (!toy_realize(nodev)) goto fail;
         } else if (NIL_P(eng)) {
             toy_unrealize(nodev);
         }
     }
     rb_funcall(nodev, rb_intern("engine_changed"), 2, old, eng);
+    return true;
+
+fail:
+    // Some descendants may already have received engine_changed and the toy
+    // may own a prefix of its bodies/sprites. Walking back through the normal
+    // transition path unregisters callbacks and toy_unrealize removes every
+    // successfully created resource.
+    (void)sn_set_engine(nodev, old);
+    return false;
+}
+
+static VALUE sn_set_engine_protected(VALUE args) {
+    return sn_set_engine(rb_ary_entry(args, 0), rb_ary_entry(args, 1))
+        ? Qtrue : Qfalse;
 }
 
 // stubs
@@ -539,7 +606,26 @@ static VALUE coll_add(VALUE self, VALUE child) {
     sn_t* c = sn_get(self);
     rb_ary_push(c->items, child);
     sn_get(child)->parent = self;
-    sn_set_engine(child, c->engine);
+    VALUE args = rb_ary_new3(2, child, c->engine);
+    int state = 0;
+    const VALUE result = rb_protect(sn_set_engine_protected, args, &state);
+    if (state || result != Qtrue) {
+        const VALUE error = state ? rb_gv_get("$!") : Qnil;
+        if (sn_get(child)->kind == SN_TOY) {
+            // Guaranteed native cleanup even if a Ruby engine_changed
+            // callback raised before the normal reverse transition could run.
+            toy_unrealize(child);
+        }
+        VALUE rollback = rb_ary_new3(2, child, Qnil);
+        int rollback_state = 0;
+        rb_protect(sn_set_engine_protected, rollback, &rollback_state);
+        rb_ary_delete(c->items, child);
+        sn_get(child)->parent = Qnil;
+        if (state) {
+            rb_exc_raise(error);
+        }
+        rb_raise(rb_eRuntimeError, "could not realize toy resources");
+    }
     return child;
 }
 
@@ -1986,7 +2072,7 @@ bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m) {
 // (Limb#mouse_down runs the default grab, ToyContainer#mouse_move drives
 // input_move).
 static VALUE sprite_node(int sprite) {
-    if (sprite < 0 || sprite >= MAX_SCENE_SPRITES) {
+    if (sprite < 0 || (size_t)sprite >= g_scene_sprite_cap) {
         return Qnil;
     }
     VALUE v = g_scene_sprite[sprite];
@@ -2028,4 +2114,7 @@ void rbh_mouse_click(int sprite, double x_px, double y_px, int button) {
 
 void rbh_shutdown(void) {
     ruby_finalize();
+    free(g_scene_sprite);
+    g_scene_sprite = NULL;
+    g_scene_sprite_cap = 0;
 }
