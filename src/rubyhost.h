@@ -57,6 +57,12 @@ void rbh_mouse_move(int sprite, double x_px, double y_px, int button,
 void rbh_mouse_up(int sprite, double x_px, double y_px, int button);
 void rbh_mouse_click(int sprite, double x_px, double y_px, int button);
 
+// Resolve a rendered sprite back to its owning default-engine Toy. Sticky
+// toys (notably World) are never recyclable. Recycling removes the whole Toy
+// through its ToyContainer, so physics, visuals, sounds, and Ruby engine
+// state follow the same teardown path as a script-driven removal.
+bool rbh_recycle_sprite(int sprite);
+
 // Report the view size in device pixels. Fires $core.screen_size_changed;
 // engines with fit_to_screen re-derive canvas/scene rects, which lands in
 // phys_set_world via the scene_walls_changed chain.

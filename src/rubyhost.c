@@ -2079,6 +2079,41 @@ static VALUE sprite_node(int sprite) {
     return v ? v : Qnil;
 }
 
+static VALUE sprite_toy(int sprite) {
+    VALUE node = sprite_node(sprite);
+    // Sprite -> SpriteContainer -> Limb -> LimbContainer -> Toy. Keep the
+    // walk generic so nested toy definitions do not depend on exact depth.
+    for (int depth = 0; depth < 16 && sn_p(node); depth++) {
+        sn_t* n = sn_get(node);
+        if (n->kind == SN_TOY) {
+            return node;
+        }
+        node = n->parent;
+    }
+    return Qnil;
+}
+
+bool rbh_recycle_sprite(int sprite) {
+    const VALUE toy = sprite_toy(sprite);
+    if (NIL_P(toy)) {
+        return false;
+    }
+    const sn_t* t = sn_get(toy);
+    const VALUE parent = t->parent;
+    if (t->sticky || t->engine != rb_gv_get("$default_engine")
+        || !sn_p(parent) || sn_get(parent)->kind != SN_COLL) {
+        return false;
+    }
+    const char* class_name = t->def ? t->def->class_name
+                                    : rb_obj_classname(toy);
+    if (!fcall_protected(parent, "remove", 1, toy, Qnil, Qnil,
+                         "recycle toy")) {
+        return false;
+    }
+    printf("toybox: recycled %s\n", class_name);
+    return true;
+}
+
 void rbh_mouse_down(int sprite, double x_px, double y_px, int button) {
     VALUE sp = sprite_node(sprite);
     if (!NIL_P(sp)) {

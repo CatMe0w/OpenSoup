@@ -86,9 +86,14 @@ static float down_pos[2];
     if (toybox_capturing()) {
         toybox_mouse_up(x, y);
     } else if (captured_sprite >= 0) {
+        const bool over_toybox = toybox_hit_test(x, y);
         rbh_mouse_up(captured_sprite, x, y, 1);
+        const bool recycled = over_toybox
+                           && rbh_recycle_sprite(captured_sprite);
         // barely-moved release = click (Win32 sends it on button release)
-        if (fabsf(x - down_pos[0]) < 4 && fabsf(y - down_pos[1]) < 4) {
+        if (!over_toybox && !recycled
+            && fabsf(x - down_pos[0]) < 4
+            && fabsf(y - down_pos[1]) < 4) {
             rbh_mouse_click(captured_sprite, x, y, 1);
         }
         captured_sprite = -1;

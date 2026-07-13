@@ -556,6 +556,64 @@ int main(int argc, char** argv) {
         }
     }
 
+    // A picked scene sprite resolves through its node parents to the whole
+    // owning Toy. Dropping it into the Toybox removes every native resource;
+    // sticky toys use the same marker as the original clear/recycle guards.
+    if (ok) {
+        const int bodies_before = phys_active_body_count();
+        bool recycle_ok = true;
+        fake_sprite_next = 1200;
+        fake_sprite_limit = 32;
+        fake_sprite_created = fake_sprite_removed = 0;
+        rbh_set_sprite_hook(fake_sprite_add, fake_sprite_remove, NULL);
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+
+        // Pick the last sprite of a six-limb bear, not its first/root visual:
+        // every visual must still resolve to and tear down the complete toy.
+        if (!rbh_spawn_toy("U6Bluebear", dir, 5.0, 5.0)
+            || fake_sprite_created < 2
+            || !rbh_recycle_sprite(fake_sprite_next - 1)) {
+            fprintf(stderr, "rubyboot: ordinary toy was not recyclable\n");
+            recycle_ok = false;
+        }
+
+        const int sticky_sprite = fake_sprite_next;
+        if (!rbh_spawn_toy("U1Bouncy", dir, 5.0, 5.0)
+            || !rbh_eval(
+                "t = $default_engine.toys.find {|toy| toy.toy_id == 'U1Bouncy'}\n"
+                "raise 'recycle test ball missing' unless t\n"
+                "t.is_sticky = true\n",
+                "sticky recycle setup")
+            || rbh_recycle_sprite(sticky_sprite)) {
+            fprintf(stderr, "rubyboot: sticky toy was recyclable\n");
+            recycle_ok = false;
+        }
+
+        const bool cleanup_ok = rbh_eval(
+            "$default_engine.toys.select {|t| t.toy_id == 'U1Bouncy'}.each do |t|\n"
+            "  $default_engine.toys.remove(t)\n"
+            "end\n"
+            "bears = $default_engine.toys.select {|t| t.toy_id == 'U6Bluebear'}\n"
+            "$default_engine.toys.remove(bears.pop) while bears.size > 1\n",
+            "recycle verification cleanup");
+        rbh_set_sprite_hook(NULL, NULL, NULL);
+        if (!cleanup_ok || phys_active_body_count() != bodies_before
+            || fake_sprite_created == 0
+            || fake_sprite_removed != fake_sprite_created) {
+            fprintf(stderr,
+                    "rubyboot: recycle teardown bodies=%d sprites=%d/%d\n",
+                    phys_active_body_count() - bodies_before,
+                    fake_sprite_removed, fake_sprite_created);
+            recycle_ok = false;
+        }
+        if (!recycle_ok) {
+            ok = false;
+        } else {
+            fprintf(stderr, "rubyboot: sprite-to-toy recycle + sticky guard\n");
+        }
+    }
+
     // A visual allocation failure after a prefix of a complex toy must make
     // rbh_spawn_toy fail and tear the prefix back down. Starting above the
     // old 1024-id map limit also exercises dynamic scene-id bookkeeping.
