@@ -15,5 +15,10 @@ typedef struct {
 } toybox_scroll_model;
 
 void toybox_scroll_model_set_target(toybox_scroll_model* model, float target);
+// Map a captured scrollbar thumb's displacement to the model target. The
+// target follows the thumb immediately; position/velocity keep evolving via
+// the original spring response in toybox_scroll_model_advance().
+void toybox_scroll_model_drag(toybox_scroll_model* model,
+                              float initial_target, float delta_px,
+                              float travel_px, float max_target);
 bool toybox_scroll_model_advance(toybox_scroll_model* model, double dt_ms);
-

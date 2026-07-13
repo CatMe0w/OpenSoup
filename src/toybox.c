@@ -90,6 +90,8 @@ static struct {
     float view_w, view_h;
     float x, y;
     tb_rect panel;
+    tb_rect scroll_track;
+    tb_rect scroll_thumb;
     float max_scroll, content_h;
     toybox_scroll_model scroll;
     tb_asset shell[TB_MAX_SHELL];
@@ -100,7 +102,9 @@ static struct {
     int hover;
     int pressed;
     bool moving;
+    bool scrolling;
     float move_dx, move_dy;
+    float scroll_drag_y, scroll_drag_target;
     int preview_sprite;
 } tb;
 
@@ -275,6 +279,8 @@ static void layout_content(void) {
     const tb_rect scroll_clip = {tb.panel.x + tb.panel.w,
                                  tb.panel.y + 3.0f,
                                  20.0f, tb.panel.h - 6.0f};
+    tb.scroll_track = scroll_clip;
+    tb.scroll_thumb = (tb_rect){0};
     float y = tb.panel.y + 8.0f - tb.scroll.position;
     const int cols = 4;
 
@@ -338,6 +344,8 @@ static void layout_content(void) {
         const float thumb_y = scroll_clip.y + (scroll_clip.h - thumb_h) * t;
         const float thumb_x = scroll_clip.x + scroll_clip.w - scroll_top->w;
         const float middle_y = thumb_y + (float)scroll_top->h;
+        tb.scroll_thumb = (tb_rect){thumb_x, thumb_y,
+                                    (float)scroll_top->w, thumb_h};
         asset_pos(scroll_top, thumb_x, thumb_y);
         asset_rect(scroll_middle,
                    thumb_x + ((float)scroll_top->w - scroll_middle->w) * 0.5f,
@@ -627,6 +635,13 @@ bool toybox_mouse_down(float x, float y) {
     if (!toybox_hit_test(x, y)) {
         return false;
     }
+    if (tb.max_scroll > 0.0f && inside(tb.scroll_thumb, x, y)) {
+        tb.scrolling = true;
+        tb.scroll_drag_y = y;
+        tb.scroll_drag_target = tb.scroll.target;
+        set_hover(-1);
+        return true;
+    }
     tb.pressed = icon_at(x, y);
     if (tb.pressed >= 0) {
         set_hover(tb.pressed);
@@ -643,7 +658,14 @@ void toybox_mouse_dragged(float x, float y) {
     if (!tb.ready) {
         return;
     }
-    if (tb.pressed >= 0) {
+    if (tb.scrolling) {
+        const float travel = tb.scroll_track.h - tb.scroll_thumb.h;
+        toybox_scroll_model_drag(&tb.scroll, tb.scroll_drag_target,
+                                 y - tb.scroll_drag_y, travel,
+                                 tb.max_scroll);
+        set_hover(-1);
+        layout_content();
+    } else if (tb.pressed >= 0) {
         preview_move(x, y);
     } else if (tb.moving) {
         tb.x = x - tb.move_dx;
@@ -674,6 +696,7 @@ void toybox_mouse_up(float x, float y) {
     preview_remove();
     tb.pressed = -1;
     tb.moving = false;
+    tb.scrolling = false;
     set_hover(toybox_hit_test(x, y) ? icon_at(x, y) : -1);
 }
 
@@ -702,7 +725,7 @@ void toybox_frame(double dt_ms) {
 }
 
 bool toybox_capturing(void) {
-    return tb.ready && (tb.pressed >= 0 || tb.moving);
+    return tb.ready && (tb.pressed >= 0 || tb.moving || tb.scrolling);
 }
 
 int toybox_catalog_count(void) {

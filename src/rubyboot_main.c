@@ -54,6 +54,27 @@ int main(int argc, char** argv) {
     fprintf(stderr, "rubyboot: Toybox scroll %.2f -> %.2f -> %.2f px\n",
             scroll_100ms, scroll_200ms, scroll_260ms);
 
+    // ScrollbarGUIComponent maps captured thumb displacement over the usable
+    // track directly into the normalized scroll model, clamped at both ends.
+    toybox_scroll_model drag = {.target = 200.0f};
+    toybox_scroll_model_drag(&drag, 200.0f, 50.0f, 200.0f, 1000.0f);
+    if (fabsf(drag.target - 450.0f) > 0.001f) {
+        fprintf(stderr, "rubyboot: Toybox thumb drag mapped to %.3f\n",
+                drag.target);
+        return 1;
+    }
+    toybox_scroll_model_drag(&drag, 200.0f, -100.0f, 200.0f, 1000.0f);
+    if (drag.target != 0.0f) {
+        fprintf(stderr, "rubyboot: Toybox thumb did not clamp at top\n");
+        return 1;
+    }
+    toybox_scroll_model_drag(&drag, 200.0f, 1000.0f, 200.0f, 1000.0f);
+    if (drag.target != 1000.0f) {
+        fprintf(stderr, "rubyboot: Toybox thumb did not clamp at bottom\n");
+        return 1;
+    }
+    fprintf(stderr, "rubyboot: Toybox thumb drag 200 -> 450 px, clamps 0..1000\n");
+
     if (!audio_init(true)) {
         fprintf(stderr, "rubyboot: cannot initialize headless audio\n");
         return 1;

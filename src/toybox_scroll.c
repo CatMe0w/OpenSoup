@@ -48,6 +48,21 @@ void toybox_scroll_model_set_target(toybox_scroll_model* model,
     model->target = target;
 }
 
+void toybox_scroll_model_drag(toybox_scroll_model* model,
+                              float initial_target, float delta_px,
+                              float travel_px, float max_target) {
+    if (!model) {
+        return;
+    }
+    max_target = fmaxf(0.0f, max_target);
+    float target = initial_target;
+    if (travel_px > 0.0f) {
+        target += delta_px * max_target / travel_px;
+    }
+    toybox_scroll_model_set_target(model,
+        fminf(fmaxf(target, 0.0f), max_target));
+}
+
 bool toybox_scroll_model_advance(toybox_scroll_model* model, double dt_ms) {
     if (!model || dt_ms <= 0.0) {
         return false;
@@ -67,4 +82,3 @@ bool toybox_scroll_model_advance(toybox_scroll_model* model, double dt_ms) {
     }
     return fabsf(model->position - old_position) >= 0.0001f;
 }
-
