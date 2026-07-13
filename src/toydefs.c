@@ -80,6 +80,8 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
         }
         s->nmembers = gi;
         s->grab = num(shape, "grab", 0) != 0.0f;
+        s->grab_move = num(shape, "grabMove", 0) != 0.0f;
+        s->grab_rotate = num(shape, "grabRotate", 0) != 0.0f;
         const cJSON* pts = cJSON_GetObjectItemCaseSensitive(shape, "points");
         s->npoints = cJSON_GetArraySize(pts);
         s->points = calloc((size_t)s->npoints ? (size_t)s->npoints : 1, sizeof(td_point));

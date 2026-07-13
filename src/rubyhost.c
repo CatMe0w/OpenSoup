@@ -934,8 +934,42 @@ static VALUE eng_scene_to_view(VALUE self, VALUE v) {
 
 // Input grab triplet - the mouse spring, anchored at the grabbed point
 // (sub_4237B0): the limb's default_grab_move/rotate flags gate the spring's
-// linear/torque components. TODO: per-shape grabMove/grabRotate override of
-// the limb defaults (needs a point-in-shape test on the hit shape).
+// linear/torque components. A containing `grab` shape overrides both flags;
+// the original walks every shape in definition order, so the last matching
+// handle wins when handles overlap.
+static int shape_contains(const td_shape* sh, double x, double y) {
+    if (!sh || sh->npoints < 1) {
+        return 0;
+    }
+    if (sh->npoints == 1) {
+        const double dx = x - sh->points[0].x;
+        const double dy = y - sh->points[0].y;
+        const double r = sh->points[0].r;
+        return dx * dx + dy * dy <= r * r;
+    }
+
+    // Rounded polygon points occasionally carry a radius. Count their caps
+    // as part of the handle, then test the polygon interior itself.
+    for (int i = 0; i < sh->npoints; i++) {
+        const double dx = x - sh->points[i].x;
+        const double dy = y - sh->points[i].y;
+        const double r = sh->points[i].r;
+        if (r > 0.0 && dx * dx + dy * dy <= r * r) {
+            return 1;
+        }
+    }
+    int inside = 0;
+    for (int i = 0, j = sh->npoints - 1; i < sh->npoints; j = i++) {
+        const double xi = sh->points[i].x, yi = sh->points[i].y;
+        const double xj = sh->points[j].x, yj = sh->points[j].y;
+        if (((yi > y) != (yj > y))
+            && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
 static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
     (void)self;
     sn_t* ln = sn_get(limb);
@@ -948,10 +982,22 @@ static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
         const float th = phys_body_orientation(ln->body);
         const float c = cosf(th), sn = sinf(th);
         const float dx = (float)px - bx, dy = (float)py - by;
+        bool move = ln->ldef ? ln->ldef->default_grab_move : true;
+        bool rotate = ln->ldef ? ln->ldef->default_grab_rotate : true;
+        if (ln->ldef && ln->lscale > 0.0) {
+            const double lx = (c * dx + sn * dy) / ln->lscale;
+            const double ly = (-sn * dx + c * dy) / ln->lscale;
+            for (int i = 0; i < ln->ldef->nshapes; i++) {
+                const td_shape* sh = &ln->ldef->shapes[i];
+                if (sh->grab && shape_contains(sh, lx, ly)) {
+                    move = sh->grab_move;
+                    rotate = sh->grab_rotate;
+                }
+            }
+        }
         in->ref1 = limb;
         phys_grab(ln->body, c * dx + sn * dy, -sn * dx + c * dy,
-                  ln->ldef ? ln->ldef->default_grab_move : true,
-                  ln->ldef ? ln->ldef->default_grab_rotate : true);
+                  move, rotate);
     }
     return Qnil;
 }

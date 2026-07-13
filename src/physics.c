@@ -881,8 +881,32 @@ void phys_grab(int body, float ax, float ay, bool move, bool rotate) {
 }
 
 void phys_grab_move(int body, float x, float y) {
-    P.bodies[body].tx = x;
-    P.bodies[body].ty = y;
+    body_t* b = &P.bodies[body];
+    b->tx = x;
+    b->ty = y;
+
+    // fixedMove/fixedRotate block ordinary integration, not the explicit
+    // editor handles selected by grabMove/grabRotate. The original can move
+    // an anchored centre handle and turn an anchored end handle; update only
+    // those locked components kinematically while the normal spring remains
+    // responsible for free bodies.
+    if (b->grot && (b->prm.anchored || b->prm.fixed_rotate)) {
+        const float r2 = b->gax * b->gax + b->gay * b->gay;
+        const float dx = x - b->px, dy = y - b->py;
+        if (r2 > 1e-8f && dx * dx + dy * dy > 1e-8f) {
+            float desired = atan2f(dy, dx) - atan2f(b->gay, b->gax);
+            while (desired - b->theta > (float)M_PI) desired -= 2.0f * (float)M_PI;
+            while (desired - b->theta < -(float)M_PI) desired += 2.0f * (float)M_PI;
+            b->theta = desired;
+            b->L = 0.0f;
+        }
+    }
+    if (b->gmove && b->prm.anchored) {
+        const float c = cosf(b->theta), sn = sinf(b->theta);
+        b->px = x - (c * b->gax - sn * b->gay);
+        b->py = y - (sn * b->gax + c * b->gay);
+        b->mx = b->my = 0.0f;
+    }
 }
 
 void phys_release(int body) {

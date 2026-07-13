@@ -275,6 +275,76 @@ int main(int argc, char** argv) {
             "input grab verification");
     }
 
+    // Fixed physics degrees of freedom are still user-editable through the
+    // original shape handles. The centre handle translates this fully fixed
+    // ramp; an end handle rotates it while keeping its position anchored.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        ok = rbh_spawn_toy("SCTurnableRamp", dir, 7.0, 4.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "ramp = $default_engine.toys.find {|t| t.toy_id == 'SCTurnableRamp'}\n"
+            "raise 'turnable ramp missing' unless ramp\n"
+            "limb = ramp.limbs.by_index(0)\n"
+            "input = $default_engine.input_by_id(:default)\n"
+            "p0 = limb.position\n"
+            "$default_engine.input_grab(limb, input, p0)\n"
+            "$default_engine.input_move(input, p0 + Vector[1.0, 1.0])\n"
+            "$default_engine.run_steps(300)\n"
+            "move_error = (limb.position - (p0 + Vector[1.0, 1.0])).r\n"
+            "raise 'fixedMove handle did not translate' unless move_error < 0.3\n"
+            "$default_engine.input_release(limb, input, limb.position)\n"
+            "moved = limb.position\n"
+            "$default_engine.run_steps(30)\n"
+            "raise 'fixedMove did not relock' unless (limb.position - moved).r < 0.01\n"
+            "theta0 = limb.orientation\n"
+            "handle = limb.position + Vector[0.72, 0.0]\n"
+            "$default_engine.input_grab(limb, input, handle)\n"
+            "$default_engine.input_move(input, handle + Vector[0.0, 0.72])\n"
+            "$default_engine.run_steps(150)\n"
+            "raise 'grabRotate handle did not rotate' unless (limb.orientation - theta0).abs > 0.1\n"
+            "raise 'rotate handle translated fixed limb' unless (limb.position - moved).r < 0.05\n"
+            "$default_engine.input_release(limb, input, limb.position)\n"
+            "$default_engine.toys.remove(ramp)\n",
+            "fixed grab handle verification");
+    }
+
+    // The reported real-world case: the cannon base uses the limb default
+    // (move only), while the small barrel-tip circle overrides it to rotate
+    // only. Both must work even though fixedMove keeps the cannon anchored
+    // against ordinary physics.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/christmas07_toy", assets);
+        ok = rbh_spawn_toy("SnowballCannon", dir, 8.0, 3.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "cannon = $default_engine.toys.find {|t| t.toy_id == 'SnowballCannon'}\n"
+            "raise 'snowball cannon missing' unless cannon\n"
+            "limb = cannon.limbs.by_index(0)\n"
+            "input = $default_engine.input_by_id(:default)\n"
+            "p0 = limb.position\n"
+            "$default_engine.input_grab(limb, input, p0)\n"
+            "$default_engine.input_move(input, p0 + Vector[0.8, 0.5])\n"
+            "$default_engine.run_steps(250)\n"
+            "raise 'cannon base did not move' unless (limb.position - p0).r > 0.5\n"
+            "$default_engine.input_release(limb, input, limb.position)\n"
+            "base = limb.position\n"
+            "theta0 = limb.orientation\n"
+            "tip = base + Vector[0.342, 0.0]\n"
+            "$default_engine.input_grab(limb, input, tip)\n"
+            "$default_engine.input_move(input, tip + Vector[0.0, 0.5])\n"
+            "$default_engine.run_steps(120)\n"
+            "raise 'cannon tip did not rotate' unless (limb.orientation - theta0).abs > 0.1\n"
+            "raise 'cannon tip translated base' unless (limb.position - base).r < 0.05\n"
+            "$default_engine.input_release(limb, input, limb.position)\n"
+            "$default_engine.toys.remove(cannon)\n",
+            "cannon grab handle verification");
+    }
+
     // First scripted toy: the goose. Spin its body past the lay angle and
     // the script must shoot a GooseEgg (new toy realized mid-simulation);
     // shrink the egg's lifetime and it must remove itself (full teardown).
@@ -308,7 +378,15 @@ int main(int argc, char** argv) {
             "egg.lifetime = 3\n"
             "$default_engine.dispatch_timers(5)\n"
             "raise 'egg not removed' unless $default_engine.toys.count == before\n"
-            "raise 'egg still realized' unless egg.limbs.by_sid(:egg).engine.nil?\n",
+            "raise 'egg still realized' unless egg.limbs.by_sid(:egg).engine.nil?\n"
+            "legs = goose.limbs.by_sid(:gooselegs)\n"
+            "input = $default_engine.input_by_id(:default)\n"
+            "legs0 = legs.position\n"
+            "$default_engine.input_grab(legs, input, legs0)\n"
+            "$default_engine.input_move(input, legs0 + Vector[0.8, 0.5])\n"
+            "$default_engine.run_steps(250)\n"
+            "raise 'goose anchored legs did not move' unless (legs.position - legs0).r > 0.5\n"
+            "$default_engine.input_release(legs, input, legs.position)\n",
             "goose verification");
     }
 

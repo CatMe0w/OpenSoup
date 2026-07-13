@@ -62,8 +62,8 @@ typedef struct {
     float mouse_dampener;
     float air_linear;       // airResistanceLinear: F = -c*v
     float air_angular;      // airResistanceAngular: tau = -c*omega
-    bool anchored;          // fixedMove: no linear motion at all
-    bool fixed_rotate;      // fixedRotate: no angular motion
+    bool anchored;          // fixedMove: no ordinary linear physics
+    bool fixed_rotate;      // fixedRotate: no ordinary angular physics
     float motor_force[2];   // constant linearMotor force, body-local
     float motor_torque;     // constant rotationalMotor torque
     // CMaterial: velocityResponse, stiffness, dampener, kineticFriction,
@@ -118,6 +118,8 @@ int phys_rotjoint_add(int body1, float o1, int body2, float o2,
 // per sub_4237B0): F = stiffness * (target - anchor_pos) - dampener *
 // anchor_vel. move gates the linear component, rotate the torque component
 // (goose body: move=0 rotate=1 - dragging only twists it about its hip).
+// A requested component overrides fixedMove/fixedRotate while the handle is
+// being dragged; the body becomes fixed again on release.
 // Defaults from the Limb ctor (0x548410): stiffness=150, dampener=5,
 // overridable per limb via mouse_*_override.
 #define PHYS_MOUSE_STIFFNESS 150.0f

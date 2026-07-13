@@ -19,6 +19,8 @@ typedef struct {
 typedef struct {
     char* sid;     // scripts address shapes via shapes.by_sid(:sid)
     bool grab;     // mouse-interaction shape
+    bool grab_move;
+    bool grab_rotate;
     int nmembers;
     char** members; // memberOf symbols, retained for collision + Ruby events
     int npoints;
