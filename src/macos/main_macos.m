@@ -147,6 +147,10 @@ static float down_pos[2];
         last_frame_time = now;
         rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
         toybox_frame(dt_ms);
+        if (toybox_quit_requested()) {
+            [NSApp terminate:nil];
+            return;
+        }
 
         const sg_swapchain swapchain = {
             .width = (int)v.drawableSize.width,

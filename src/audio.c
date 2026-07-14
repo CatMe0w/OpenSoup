@@ -30,6 +30,7 @@ typedef struct {
 static struct {
     bool initialized;
     bool no_device;
+    bool muted;
     ma_engine engine;
     audio_sample_t samples[AUDIO_MAX_SAMPLES];
     int nsamples;
@@ -184,6 +185,22 @@ void audio_stop_owner(uint32_t owner) {
             voice_release(&g_audio.voices[i]);
         }
     }
+}
+
+bool audio_set_muted(bool muted) {
+    if (!g_audio.initialized) {
+        return false;
+    }
+    if (ma_engine_set_volume(&g_audio.engine, muted ? 0.0f : 1.0f)
+        != MA_SUCCESS) {
+        return false;
+    }
+    g_audio.muted = muted;
+    return true;
+}
+
+bool audio_muted(void) {
+    return g_audio.initialized && g_audio.muted;
 }
 
 int audio_active_voices(void) {

@@ -2114,6 +2114,46 @@ bool rbh_recycle_sprite(int sprite) {
     return true;
 }
 
+bool rbh_clear_scene(void) {
+    const VALUE engine = rb_gv_get("$default_engine");
+    if (!sn_p(engine)) {
+        return false;
+    }
+    const VALUE toys = sn_get(engine)->colls[0];
+    if (!sn_p(toys) || sn_get(toys)->kind != SN_COLL) {
+        return false;
+    }
+
+    bool ok = fcall_protected(engine, "set_scene_defaults", 0,
+                              Qnil, Qnil, Qnil, "clear scene defaults");
+    // on_clear may remove itself or mutate the collection, so walk a snapshot.
+    const VALUE snapshot = rb_ary_dup(sn_get(toys)->items);
+    const ID on_clear = rb_intern("on_clear");
+    int removed = 0;
+    for (long i = 0; i < RARRAY(snapshot)->len; i++) {
+        const VALUE toy = rb_ary_entry(snapshot, i);
+        if (!sn_p(toy) || sn_get(toy)->kind != SN_TOY) {
+            continue;
+        }
+        if (rb_respond_to(toy, on_clear)
+            && !fcall_protected(toy, "on_clear", 0, Qnil, Qnil, Qnil,
+                                "toy on_clear")) {
+            ok = false;
+        }
+        sn_t* node = sn_get(toy);
+        if (!node->sticky && node->parent == toys) {
+            if (fcall_protected(toys, "remove", 1, toy, Qnil, Qnil,
+                                "clear toy")) {
+                removed++;
+            } else {
+                ok = false;
+            }
+        }
+    }
+    printf("toybox: cleared %d toys\n", removed);
+    return ok;
+}
+
 void rbh_mouse_down(int sprite, double x_px, double y_px, int button) {
     VALUE sp = sprite_node(sprite);
     if (!NIL_P(sp)) {

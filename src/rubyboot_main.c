@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "physics.h"
 #include "toydefs.h"
+#include "toybox_button.h"
 #include "toybox_scroll.h"
 #include <math.h>
 #include <stdio.h>
@@ -75,8 +76,58 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "rubyboot: Toybox thumb drag 200 -> 450 px, clamps 0..1000\n");
 
+    // ButtonGUIComponent uses all six frames as one linear press track. A
+    // quick momentary click must finish the forward leg, return to frame zero,
+    // and only then dispatch; toggles travel once to their opposite endpoint.
+    toybox_button_model momentary;
+    toybox_button_init(&momentary, 0.14f, false, false);
+    toybox_button_down(&momentary, 10.0f, 10.0f);
+    bool button_command = toybox_button_advance(&momentary, 35.0, NULL);
+    if (button_command || toybox_button_frame(&momentary, 6) != 1
+        || !toybox_button_up(&momentary, 10.0f, 10.0f)
+        || toybox_button_advance(&momentary, 110.0, NULL)
+        || toybox_button_frame(&momentary, 6) != 5
+        || !toybox_button_advance(&momentary, 145.0, NULL)
+        || toybox_button_frame(&momentary, 6) != 0) {
+        fprintf(stderr, "rubyboot: Toybox momentary button trajectory wrong\n");
+        return 1;
+    }
+
+    toybox_button_model toggle;
+    bool desired_on = false;
+    toybox_button_init(&toggle, 0.14f, true, false);
+    toybox_button_down(&toggle, 20.0f, 20.0f);
+    toybox_button_advance(&toggle, 16.0, NULL); // settle at its current endpoint
+    if (!toybox_button_up(&toggle, 20.0f, 20.0f)
+        || toybox_button_advance(&toggle, 70.0, &desired_on)
+        || !toybox_button_advance(&toggle, 75.0, &desired_on)
+        || !desired_on || toybox_button_frame(&toggle, 6) != 5) {
+        fprintf(stderr, "rubyboot: Toybox toggle button trajectory wrong\n");
+        return 1;
+    }
+    toybox_button_sync(&toggle, true);
+
+    toybox_button_model cancelled;
+    toybox_button_init(&cancelled, 0.14f, false, false);
+    toybox_button_down(&cancelled, 0.0f, 0.0f);
+    toybox_button_advance(&cancelled, 35.0, NULL);
+    if (toybox_button_up(&cancelled, 2.0f, 0.0f)
+        || toybox_button_advance(&cancelled, 40.0, NULL)
+        || toybox_button_frame(&cancelled, 6) != 0) {
+        fprintf(stderr, "rubyboot: Toybox button click slop wrong\n");
+        return 1;
+    }
+    fprintf(stderr,
+            "rubyboot: Toybox buttons 140ms linear forward/reverse, 1.5px slop\n");
+
     if (!audio_init(true)) {
         fprintf(stderr, "rubyboot: cannot initialize headless audio\n");
+        return 1;
+    }
+    if (!audio_set_muted(true) || !audio_muted()
+        || !audio_set_muted(false) || audio_muted()) {
+        fprintf(stderr, "rubyboot: audio mute toggle failed\n");
+        audio_shutdown();
         return 1;
     }
 
@@ -668,6 +719,24 @@ int main(int argc, char** argv) {
         if (ok) {
             fprintf(stderr, "rubyboot: partial realization rolled back\n");
         }
+    }
+
+    // The Toybox clear command removes complete non-sticky toys through the
+    // Ruby container teardown path while preserving the sticky World.
+    if (ok && !rbh_clear_scene()) {
+        fprintf(stderr, "rubyboot: Toybox clear command failed\n");
+        ok = false;
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "toys = $default_engine.toys.to_a\n"
+            "raise 'clear left ordinary toys' unless toys.all? {|t| t.is_sticky?}\n"
+            "raise 'clear removed world' unless toys.find {|t| t.sid == :world}\n"
+            "raise 'clear scale' unless ($default_engine.scale - 100.0).abs < 1e-6\n",
+            "Toybox clear verification");
+    }
+    if (ok) {
+        fprintf(stderr, "rubyboot: Toybox clear preserved sticky World\n");
     }
 
     printf(ok ? "rubyboot: OK\n" : "rubyboot: FAILED\n");

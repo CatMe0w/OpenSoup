@@ -1,9 +1,11 @@
 #include "toybox.h"
 
 #include "assets.h"
+#include "audio.h"
 #include "rubyhost.h"
 #include "scene.h"
 #include "toydefs.h"
+#include "toybox_button.h"
 #include "toybox_scroll.h"
 #include <math.h>
 #include <stdio.h>
@@ -27,6 +29,7 @@
 #define TB_CELL_W 80.0f
 #define TB_CELL_H 80.0f
 #define TB_HEADER_H 80.0f
+#define TB_BUTTON_PERIOD_S 0.14f
 
 typedef struct {
     int w, h;
@@ -101,12 +104,22 @@ static struct {
     int nicons;
     int hover;
     int pressed;
+    tb_rect buttons[SH_COUNT];
+    toybox_button_model button_models[SH_COUNT];
+    int button_pressed;
+    bool quit_requested;
     bool moving;
     bool scrolling;
     float move_dx, move_dy;
     float scroll_drag_y, scroll_drag_target;
     int preview_sprite;
 } tb;
+
+static const int animated_buttons[] = {
+    SH_CLOSE,
+    SH_CLEAR, SH_PLAY, SH_REC, SH_REWIND,
+    SH_BACKGROUND, SH_MUTE, SH_HELP, SH_WEB,
+};
 
 static bool inside(tb_rect r, float x, float y) {
     return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
@@ -240,6 +253,89 @@ static void asset_pos(tb_asset* a, float x, float y) {
 static void asset_visible(tb_asset* a, bool visible) {
     if (a->sprite >= 0) {
         scene_sprite_set_visible(a->sprite, visible);
+    }
+}
+
+static void button_pos(int slot, float x, float y) {
+    tb_asset* asset = &tb.shell[slot];
+    asset_pos(asset, x, y);
+    tb.buttons[slot] = (tb_rect){x, y, (float)asset->w, (float)asset->h};
+}
+
+static int button_at(float x, float y) {
+    for (size_t i = 0;
+         i < sizeof animated_buttons / sizeof animated_buttons[0];
+         i++) {
+        const int slot = animated_buttons[i];
+        if (tb.shell[slot].sprite >= 0 && inside(tb.buttons[slot], x, y)) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+static void refresh_button(int slot) {
+    tb_asset* asset = &tb.shell[slot];
+    if (asset->sprite < 0 || asset->nframes < 1) {
+        return;
+    }
+    scene_sprite_set_frame(asset->sprite,
+        toybox_button_frame(&tb.button_models[slot], asset->nframes));
+}
+
+static void refresh_buttons(void) {
+    for (size_t i = 0;
+         i < sizeof animated_buttons / sizeof animated_buttons[0];
+         i++) {
+        refresh_button(animated_buttons[i]);
+    }
+}
+
+static const char* button_command(int slot) {
+    switch (slot) {
+        case SH_CLOSE: return "quitToyBox";
+        case SH_PLAY: return "open";
+        case SH_REC: return "save";
+        case SH_CLEAR: return "clear";
+        case SH_MUTE: return "mute";
+        case SH_REWIND: return "restartPlayset";
+        case SH_BACKGROUND: return "toggle_background";
+        case SH_HELP: return "toggle_help";
+        case SH_WEB: return "openWebsite";
+        default: return "unknown";
+    }
+}
+
+static bool activate_button(int slot, bool desired_on) {
+    switch (slot) {
+        case SH_CLOSE:
+            tb.quit_requested = true;
+            return true;
+        case SH_CLEAR:
+            if (!rbh_clear_scene()) {
+                fprintf(stderr, "toybox: clear failed\n");
+                return false;
+            }
+            return true;
+        case SH_MUTE:
+            if (audio_set_muted(desired_on)) {
+                printf("toybox: mute %s\n", desired_on ? "on" : "off");
+                return true;
+            } else {
+                fprintf(stderr, "toybox: mute failed\n");
+                return false;
+            }
+        default:
+            // Keep the command identity honest until playset I/O, Background,
+            // F10 help, and platform URL opening have their real backends.
+            if (tb.button_models[slot].toggle) {
+                printf("toybox: command %s.%s is not implemented yet\n",
+                       button_command(slot), desired_on ? "on" : "off");
+            } else {
+                printf("toybox: command %s is not implemented yet\n",
+                       button_command(slot));
+            }
+            return false;
     }
 }
 
@@ -395,17 +491,20 @@ static void layout_shell(void) {
 
     asset_pos(&tb.shell[SH_LOGO], tb.x + 12.0f, tb.y + 8.0f);
     asset_pos(&tb.shell[SH_MIN], tb.x + TB_W - 56.0f, tb.y + 17.0f);
-    asset_pos(&tb.shell[SH_CLOSE], tb.x + TB_W - 31.0f, tb.y + 10.0f);
+    tb.buttons[SH_MIN] = (tb_rect){tb.x + TB_W - 56.0f, tb.y + 17.0f,
+                                  (float)tb.shell[SH_MIN].w,
+                                  (float)tb.shell[SH_MIN].h};
+    button_pos(SH_CLOSE, tb.x + TB_W - 31.0f, tb.y + 10.0f);
 
     const float by = tb.y + TB_H - 31.0f;
-    asset_pos(&tb.shell[SH_CLEAR], tb.x + 12.0f, by);
-    asset_pos(&tb.shell[SH_PLAY], tb.x + 46.0f, by);
-    asset_pos(&tb.shell[SH_REC], tb.x + 82.0f, by);
-    asset_pos(&tb.shell[SH_REWIND], tb.x + 119.0f, by);
-    asset_pos(&tb.shell[SH_BACKGROUND], tb.x + 154.0f, by + 1.0f);
-    asset_pos(&tb.shell[SH_MUTE], tb.x + 187.0f, by);
-    asset_pos(&tb.shell[SH_HELP], tb.x + 219.0f, by);
-    asset_pos(&tb.shell[SH_WEB], tb.x + 251.0f, by);
+    button_pos(SH_CLEAR, tb.x + 12.0f, by);
+    button_pos(SH_PLAY, tb.x + 46.0f, by);
+    button_pos(SH_REC, tb.x + 82.0f, by);
+    button_pos(SH_REWIND, tb.x + 119.0f, by);
+    button_pos(SH_BACKGROUND, tb.x + 154.0f, by + 1.0f);
+    button_pos(SH_MUTE, tb.x + 187.0f, by);
+    button_pos(SH_HELP, tb.x + 219.0f, by);
+    button_pos(SH_WEB, tb.x + 251.0f, by);
 
     for (int i = 0; i < SH_COUNT; i++) {
         if (i != SH_SCROLL_TOP && i != SH_SCROLL_MIDDLE &&
@@ -413,6 +512,7 @@ static void layout_shell(void) {
             asset_visible(&tb.shell[i], tb.visible);
         }
     }
+    refresh_buttons();
     update_content_height();
     layout_content();
 }
@@ -485,6 +585,7 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
     memset(&tb, 0, sizeof(tb));
     tb.hover = -1;
     tb.pressed = -1;
+    tb.button_pressed = -1;
     tb.preview_sprite = -1;
     tb.visible = true;
     tb.view_w = view_w;
@@ -538,18 +639,33 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
 } while (0)
     LOAD_BUTTON(SH_LOGO, "logo");
     LOAD_BUTTON(SH_MIN, "min_button");
-    LOAD_BUTTON(SH_CLOSE, "close_button");
-    LOAD_BUTTON(SH_BACKGROUND, "background_button");
-    LOAD_BUTTON(SH_PLAY, "play_button");
-    LOAD_BUTTON(SH_REC, "rec_button");
-    LOAD_BUTTON(SH_REWIND, "rewind_button");
-    LOAD_BUTTON(SH_CLEAR, "clear_button");
-    LOAD_BUTTON(SH_HELP, "help_button");
-    LOAD_BUTTON(SH_WEB, "web_button");
 #undef LOAD_BUTTON
+#define LOAD_BUTTON_STATES(slot, base) do { \
+    snprintf(rel, sizeof rel, "%s%s", btn, base); \
+    asset_load_sequence(&tb.shell[slot], rel, 6, tb.x, tb.y); \
+} while (0)
+    LOAD_BUTTON_STATES(SH_BACKGROUND, "background_button");
+    LOAD_BUTTON_STATES(SH_CLOSE, "close_button");
+    LOAD_BUTTON_STATES(SH_PLAY, "play_button");
+    LOAD_BUTTON_STATES(SH_REC, "rec_button");
+    LOAD_BUTTON_STATES(SH_REWIND, "rewind_button");
+    LOAD_BUTTON_STATES(SH_CLEAR, "clear_button");
+    LOAD_BUTTON_STATES(SH_HELP, "help_button");
+    LOAD_BUTTON_STATES(SH_WEB, "web_button");
+#undef LOAD_BUTTON_STATES
     asset_load_sequence(&tb.shell[SH_MUTE],
                         "toybox_toy/graphics/toybox/bigger mute/mute_in_button",
-                        1, tb.x, tb.y);
+                        6, tb.x, tb.y);
+    for (size_t i = 0;
+         i < sizeof animated_buttons / sizeof animated_buttons[0];
+         i++) {
+        const int slot = animated_buttons[i];
+        const bool toggle = slot == SH_BACKGROUND || slot == SH_MUTE
+                         || slot == SH_HELP;
+        const bool on = slot == SH_MUTE && audio_muted();
+        toybox_button_init(&tb.button_models[slot], TB_BUTTON_PERIOD_S,
+                           toggle, on);
+    }
 
     for (int i = 0; i < toydefs_pack_count() && tb.npacks < TB_MAX_PACKS; i++) {
         const toypack_t* def = toydefs_pack_at(i);
@@ -605,6 +721,7 @@ void toybox_shutdown(void) {
     memset(&tb, 0, sizeof(tb));
     tb.hover = -1;
     tb.pressed = -1;
+    tb.button_pressed = -1;
     tb.preview_sprite = -1;
 }
 
@@ -625,10 +742,12 @@ bool toybox_hit_test(float x, float y) {
 }
 
 void toybox_pointer_move(float x, float y) {
-    if (!tb.ready || tb.pressed >= 0 || tb.moving) {
+    if (!tb.ready || tb.pressed >= 0 || tb.button_pressed >= 0 ||
+        tb.moving || tb.scrolling) {
         return;
     }
-    set_hover(toybox_hit_test(x, y) ? icon_at(x, y) : -1);
+    const bool over = toybox_hit_test(x, y);
+    set_hover(over ? icon_at(x, y) : -1);
 }
 
 bool toybox_mouse_down(float x, float y) {
@@ -639,6 +758,20 @@ bool toybox_mouse_down(float x, float y) {
         tb.scrolling = true;
         tb.scroll_drag_y = y;
         tb.scroll_drag_target = tb.scroll.target;
+        set_hover(-1);
+        return true;
+    }
+    const int button = button_at(x, y);
+    if (button >= 0) {
+        tb.button_pressed = button;
+        set_hover(-1);
+        toybox_button_down(&tb.button_models[button], x, y);
+        refresh_button(button);
+        return true;
+    }
+    // Until OpenSoup has a persistent Dock/menu-bar reopening affordance,
+    // consume the visible minimise button without making the Toybox vanish.
+    if (inside(tb.buttons[SH_MIN], x, y)) {
         set_hover(-1);
         return true;
     }
@@ -658,7 +791,12 @@ void toybox_mouse_dragged(float x, float y) {
     if (!tb.ready) {
         return;
     }
-    if (tb.scrolling) {
+    if (tb.button_pressed >= 0) {
+        toybox_button_model* model = &tb.button_models[tb.button_pressed];
+        if (model->pressed && button_at(x, y) != tb.button_pressed) {
+            toybox_button_cancel(model);
+        }
+    } else if (tb.scrolling) {
         const float travel = tb.scroll_track.h - tb.scroll_thumb.h;
         toybox_scroll_model_drag(&tb.scroll, tb.scroll_drag_target,
                                  y - tb.scroll_drag_y, travel,
@@ -680,6 +818,12 @@ void toybox_mouse_up(float x, float y) {
     if (!tb.ready) {
         return;
     }
+    if (tb.button_pressed >= 0) {
+        const int pressed = tb.button_pressed;
+        toybox_button_up(&tb.button_models[pressed], x, y);
+        tb.button_pressed = -1;
+        return;
+    }
     if (tb.pressed >= 0 && !toybox_hit_test(x, y)) {
         const tb_icon* icon = &tb.icons[tb.pressed];
         double wx, wy;
@@ -697,7 +841,8 @@ void toybox_mouse_up(float x, float y) {
     tb.pressed = -1;
     tb.moving = false;
     tb.scrolling = false;
-    set_hover(toybox_hit_test(x, y) ? icon_at(x, y) : -1);
+    const bool over = toybox_hit_test(x, y);
+    set_hover(over ? icon_at(x, y) : -1);
 }
 
 void toybox_scroll(float delta_y, bool precise) {
@@ -722,10 +867,34 @@ void toybox_frame(double dt_ms) {
         set_hover(-1);
         layout_content();
     }
+    if (!tb.ready) {
+        return;
+    }
+    for (size_t i = 0;
+         i < sizeof animated_buttons / sizeof animated_buttons[0];
+         i++) {
+        const int slot = animated_buttons[i];
+        toybox_button_model* model = &tb.button_models[slot];
+        bool desired_on = false;
+        if (toybox_button_advance(model, dt_ms, &desired_on)) {
+            const bool old_on = model->on;
+            const bool succeeded = activate_button(slot, desired_on);
+            if (model->toggle) {
+                toybox_button_sync(model,
+                    succeeded ? desired_on : old_on);
+            }
+        }
+        refresh_button(slot);
+    }
+}
+
+bool toybox_quit_requested(void) {
+    return tb.ready && tb.quit_requested;
 }
 
 bool toybox_capturing(void) {
-    return tb.ready && (tb.pressed >= 0 || tb.moving || tb.scrolling);
+    return tb.ready && (tb.pressed >= 0 || tb.button_pressed >= 0 ||
+                        tb.moving || tb.scrolling);
 }
 
 int toybox_catalog_count(void) {

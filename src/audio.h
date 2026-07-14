@@ -21,8 +21,12 @@ int audio_sample_load(const char* path);
 bool audio_play(int sample, uint32_t owner, float volume, bool looping);
 void audio_stop_owner(uint32_t owner);
 
+// Global mixer mute used by the Toybox's toggle button. Muting preserves
+// active voice positions so unmuting resumes rather than restarts sounds.
+bool audio_set_muted(bool muted);
+bool audio_muted(void);
+
 int audio_active_voices(void);
 bool audio_sample_info(int sample, int* channels, int* sample_rate,
                        uint64_t* frames);
 bool audio_render_frames(uint64_t frames);
-

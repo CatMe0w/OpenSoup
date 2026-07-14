@@ -17,6 +17,9 @@ void toybox_mouse_up(float x_px, float y_px);
 // Trackpad momentum is supplied by the platform's normal scroll event stream.
 void toybox_scroll(float delta_y, bool precise);
 void toybox_frame(double dt_ms);
+// Set only after the close button completes the original forward/reverse
+// animation and dispatches quitToyBox.
+bool toybox_quit_requested(void);
 
 bool toybox_capturing(void);
 int toybox_catalog_count(void);

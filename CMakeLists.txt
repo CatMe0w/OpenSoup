@@ -37,6 +37,7 @@ if(APPLE)
         src/assets.c
         src/demo.c
         src/toybox.c
+        src/toybox_button.c
         src/toybox_scroll.c
         src/physics.c
         src/toydefs.c
@@ -74,6 +75,7 @@ if(APPLE)
         src/rubyboot_main.c
         src/assets.c
         src/rubyhost.c
+        src/toybox_button.c
         src/toybox_scroll.c
         src/physics.c
         src/toydefs.c

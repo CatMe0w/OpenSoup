@@ -63,6 +63,10 @@ void rbh_mouse_click(int sprite, double x_px, double y_px, int button);
 // state follow the same teardown path as a script-driven removal.
 bool rbh_recycle_sprite(int sprite);
 
+// Original Toybox "clear": restore the default scene geometry/settings,
+// notify toys with on_clear hooks, then remove every non-sticky scene toy.
+bool rbh_clear_scene(void);
+
 // Report the view size in device pixels. Fires $core.screen_size_changed;
 // engines with fit_to_screen re-derive canvas/scene rects, which lands in
 // phys_set_world via the scene_walls_changed chain.
