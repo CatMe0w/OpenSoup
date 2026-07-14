@@ -1,4 +1,4 @@
-// OpenSoup MVP: transparent always-on-top overlay with per-pixel
+// OpenSoup MVP: transparent desktop scene with per-pixel
 // click-through, rendering via sokol_gfx (Metal). No sokol_app: window
 // management is our own, since click-through overlays are the whole point.
 #import <Cocoa/Cocoa.h>
@@ -18,6 +18,26 @@ static id<MTLDevice> mtl_device;
 static id view_delegate; // MTKView.delegate is weak, keep it alive here
 static const char* assets_root = "private/extracted"; // temporary, remove once we have a proper asset pipeline
 static CFTimeInterval last_frame_time;
+static NSString* const app_name = @"OpenSoup";
+
+static NSRect visible_scene_frame(void) {
+    NSScreen* screen = window.screen ?: NSScreen.mainScreen;
+    return screen.visibleFrame;
+}
+
+static void setup_app_menu(void) {
+    NSMenu* main_menu = [[NSMenu alloc] initWithTitle:@""];
+    NSMenuItem* app_menu_item = [[NSMenuItem alloc]
+        initWithTitle:app_name action:nil keyEquivalent:@""];
+    [main_menu addItem:app_menu_item];
+
+    NSMenu* app_menu = [[NSMenu alloc] initWithTitle:app_name];
+    [app_menu addItemWithTitle:[@"Quit " stringByAppendingString:app_name]
+                        action:@selector(terminate:)
+                 keyEquivalent:@"q"];
+    app_menu_item.submenu = app_menu;
+    NSApp.mainMenu = main_menu;
+}
 
 // window points (bottom-left origin) -> device pixels (top-left origin),
 // the scene's coordinate space
@@ -172,24 +192,24 @@ static float down_pos[2];
 @implementation OverlayAppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
     (void)note;
-    const NSRect screen_rect = [NSScreen mainScreen].frame;
+    const NSRect screen_rect = visible_scene_frame();
 
     window = [[OverlayWindow alloc]
         initWithContentRect:screen_rect
                   styleMask:NSWindowStyleMaskBorderless
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    window.level = NSStatusWindowLevel;
-    window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces
-                              | NSWindowCollectionBehaviorStationary
-                              | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    window.level = NSNormalWindowLevel;
     window.opaque = NO;
     window.backgroundColor = NSColor.clearColor;
     window.hasShadow = NO;
     window.ignoresMouseEvents = YES;
+    window.title = app_name;
 
     mtl_device = MTLCreateSystemDefaultDevice();
-    view = [[OverlayView alloc] initWithFrame:screen_rect device:mtl_device];
+    const NSRect view_rect = NSMakeRect(0, 0, screen_rect.size.width,
+                                       screen_rect.size.height);
+    view = [[OverlayView alloc] initWithFrame:view_rect device:mtl_device];
     view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     view.depthStencilPixelFormat = MTLPixelFormatInvalid;
     view.sampleCount = 1;
@@ -221,7 +241,11 @@ static float down_pos[2];
           n, toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
           assets_root);
 
-    [window orderFrontRegardless];
+    [window makeKeyAndOrderFront:nil];
+}
+- (void)applicationDidChangeScreenParameters:(NSNotification*)note {
+    (void)note;
+    [window setFrame:visible_scene_frame() display:YES];
 }
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
@@ -260,8 +284,10 @@ int main(int argc, char** argv) {
         }
     }
     @autoreleasepool {
+        NSProcessInfo.processInfo.processName = app_name;
         [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        setup_app_menu();
         OverlayAppDelegate* delegate = [[OverlayAppDelegate alloc] init];
         [NSApp setDelegate:delegate];
         [NSApp run];
