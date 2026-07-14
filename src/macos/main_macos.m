@@ -8,10 +8,10 @@
 #include "app_paths.h"
 #include "scene.h"
 #include "audio.h"
-#include "demo.h"
 #include "rubyhost.h"
 #include "toydefs.h"
 #include "toybox.h"
+#include "toyvisuals.h"
 
 static NSWindow* window;
 static MTKView* view;
@@ -56,8 +56,12 @@ static void show_quit_alert(NSString* message, NSString* information) {
     alert.alertStyle = NSAlertStyleWarning;
     alert.messageText = message;
     alert.informativeText = information;
+    [alert addButtonWithTitle:@"Open Folder and Quit"];
     [alert addButtonWithTitle:@"Quit"];
-    [alert runModal];
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        open_opensoup_folder();
+    }
 }
 
 static void show_missing_asset_alert(app_assets_state state) {
@@ -72,18 +76,9 @@ static void show_missing_asset_alert(app_assets_state state) {
 
     NSString* root = [NSString stringWithUTF8String:assets_root];
     NSString* missing = [root stringByAppendingPathComponent:name];
-    prepare_modal_ui();
-    NSAlert* alert = [[NSAlert alloc] init];
-    alert.alertStyle = NSAlertStyleWarning;
-    alert.messageText = @"Required game asset not found";
-    alert.informativeText = [NSString stringWithFormat:
-        @"OpenSoup could not find the required asset at:\n\n%@", missing];
-    [alert addButtonWithTitle:@"Open Folder and Quit"];
-    [alert addButtonWithTitle:@"Quit"];
-
-    if ([alert runModal] == NSAlertFirstButtonReturn) {
-        open_opensoup_folder();
-    }
+    show_quit_alert(@"Required game asset not found",
+        [NSString stringWithFormat:
+            @"OpenSoup could not find the required asset at:\n\n%@", missing]);
 }
 
 static void show_assets_directory_creation_alert(void) {
@@ -230,11 +225,6 @@ static float down_pos[2];
         toybox_scroll(delta_y, precise);
     }
 }
-- (void)keyDown:(NSEvent*)event {
-    if (event.keyCode == 53) { // Esc
-        [NSApp terminate:nil];
-    }
-}
 @end
 
 @interface OverlayViewDelegate : NSObject<MTKViewDelegate>
@@ -332,11 +322,11 @@ static float down_pos[2];
     // world extents must be known before toys spawn
     rbh_screen_size(view.drawableSize.width, view.drawableSize.height);
 
-    const int n = demo_load(assets_root);
+    toyvisuals_init(assets_root);
     const bool toybox_ok = toybox_init(assets_root, view.drawableSize.width,
                                        view.drawableSize.height);
-    NSLog(@"OpenSoup up: %d demo toys, Toybox %s (%d icons) from %s; drag them, empty space clicks through, Esc quits",
-          n, toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
+    NSLog(@"OpenSoup up: Toybox %s (%d icons) from %s",
+          toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
           assets_root);
 
     [window makeKeyAndOrderFront:nil];
@@ -355,7 +345,7 @@ static float down_pos[2];
 @end
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0); // keep demo printfs visible when piped
+    setvbuf(stdout, NULL, _IOLBF, 0); // keep diagnostics visible when piped
     assets_root = app_assets_root();
     if (!assets_root) {
         fprintf(stderr, "cannot resolve the assets path\n");
@@ -381,8 +371,6 @@ int main(void) {
     }
     // Ruby boot from main: 1.8's conservative GC records the stack base at
     // ruby_init, so init must sit at least as shallow as any later Ruby call.
-    //
-    // Framework-only for now; the native demo still owns the scene.
     {
         if (!audio_init(false)) {
             NSLog(@"Audio output unavailable, continuing silent");
@@ -393,11 +381,15 @@ int main(void) {
             fprintf(stderr, "toydefs.json missing at %s\n", p);
         }
         snprintf(p, sizeof p, "%s/souptoys_core_toy", assets_root);
-        if (rbh_boot(p)) {
-            NSLog(@"Ruby framework booted");
-        } else {
-            NSLog(@"Ruby framework boot failed, continuing native-only");
+        if (!rbh_boot(p)) {
+            @autoreleasepool {
+                show_quit_alert(@"Ruby framework failed to start",
+                    @"OpenSoup could not load the Souptoys Ruby framework. "
+                     "Check the Ruby scripts in the Assets folder.");
+            }
+            return 1;
         }
+        NSLog(@"Ruby framework booted");
     }
     @autoreleasepool {
         NSProcessInfo.processInfo.processName = app_name;

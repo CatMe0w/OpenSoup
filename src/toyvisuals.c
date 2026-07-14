@@ -1,12 +1,8 @@
-// Demo bootstrap: hardcoded toy picks, instantiated through the Ruby
-// framework (ToyClassResolver -> Toy.new -> toys <<). The C side here only
-// supplies the visual half of realization: FLC loading into the scene.
-// The toybox menu UI replaces the hardcoded picks later.
-#include "demo.h"
+// Visual bridge from Ruby-hosted toys to the native scene.
+#include "toyvisuals.h"
 #include "assets.h"
 #include "rubyhost.h"
 #include "scene.h"
-#include "toydefs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +127,7 @@ static int ruby_sprite_hook(const char* image, int body, float com_x,
     if (sprite >= 0) {
         scene_sprite_bind_body(sprite, body, com_x, com_y);
     } else {
-        fprintf(stderr, "demo: FAILED %s\n", cpath);
+        fprintf(stderr, "toyvisuals: failed to load %s\n", cpath);
     }
     free(cpath);
     return sprite;
@@ -142,53 +138,7 @@ static void ruby_sprite_remove_hook(int sprite, void* user) {
     scene_sprite_remove(sprite);
 }
 
-int demo_load(const char* assets_root) {
-    char* defs = join(assets_root, "toydefs.json");
-    if (toydefs_load(defs)) {
-        printf("demo: %d toy defs loaded\n", toydefs_count());
-    } else {
-        fprintf(stderr, "demo: toydefs.json missing at %s\n", defs);
-        free(defs);
-        return 0;
-    }
-    free(defs);
-
-    // every toy goes through the Ruby framework now: ToyClassResolver ->
-    // Toy.new -> move -> toys <<, realized into physics + scene on add.
-    // The def's `root` names the container dir holding any toy script.
+void toyvisuals_init(const char* assets_root) {
     rbh_set_sprite_hook(ruby_sprite_hook, ruby_sprite_remove_hook,
                         (void*)assets_root);
-    static const struct { const char* name; float x, y; } picks[] = {
-        { "PirateWind", 3.0f, 4.0f },  // fixed scenery: anchored, gravity 0
-        { "U1Bouncy", 6.0f, 6.0f },    // bouncy ball
-        { "BalloonBlue", 9.0f, 5.0f }, // POSITIVE gravity override, floats
-        { "U6Bluebear", 12.0f, 5.0f },     // 6 limbs, 11 spring joints
-        { "Goose", 15.0f, 3.0f },          // scripted: rocks, lays eggs
-        { "SnowballCannon", 18.0f, 1.0f }, // scripted: click fires snowballs
-    };
-    // classes referenced by other toys' scripts must resolve before they run
-    // (SnowballCannon#shoot does SnowballLarge.new); toy import will do this
-    // wholesale later
-    static const char* preload[] = { "GooseEgg", "SnowballLarge",
-                                     "SnowballSmall" };
-    for (size_t i = 0; i < sizeof preload / sizeof preload[0]; i++) {
-        const toydef_t* d = toydefs_find(preload[i]);
-        if (d) {
-            char* dir = join(assets_root, d->root);
-            rbh_load_toy_class(preload[i], dir);
-            free(dir);
-        }
-    }
-
-    int n = 0;
-    for (size_t i = 0; i < sizeof picks / sizeof picks[0]; i++) {
-        const toydef_t* d = toydefs_find(picks[i].name);
-        char* dir = join(assets_root, d ? d->root : ".");
-        if (rbh_spawn_toy(picks[i].name, dir, picks[i].x, picks[i].y)) {
-            printf("demo: %s spawned via Ruby\n", picks[i].name);
-            n++;
-        }
-        free(dir);
-    }
-    return n;
 }
