@@ -4,6 +4,20 @@ include(ProcessorCount)
 set(RUBY186_SOURCE_DIR "${CMAKE_SOURCE_DIR}/vendor/ruby")
 set(RUBY186_BINARY_DIR "${CMAKE_BINARY_DIR}/ruby186")
 
+list(LENGTH CMAKE_OSX_ARCHITECTURES _ruby186_arch_count)
+if(_ruby186_arch_count GREATER 1)
+    message(FATAL_ERROR
+        "Ruby 1.8.6 must be built for one macOS architecture per build tree")
+endif()
+set(RUBY186_CONFIGURE_PLATFORM_ARGS)
+if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" AND
+   CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    list(APPEND RUBY186_CONFIGURE_PLATFORM_ARGS
+        --build=x86_64-apple-darwin
+        --host=x86_64-apple-darwin
+    )
+endif()
+
 # macOS: use the system make instead of relying on a Homebrew gmake that may not exist
 find_program(RUBY186_MAKE_PROGRAM NAMES make gmake
     PATHS /usr/bin /bin
@@ -48,11 +62,14 @@ ExternalProject_Add(ruby186_build
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
         "CC=${CMAKE_C_COMPILER}"
+        "AR=${CMAKE_AR}"
+        "RANLIB=${CMAKE_RANLIB}"
         "CFLAGS=${RUBY186_CFLAGS}"
         "LDFLAGS=${RUBY186_LDFLAGS}"
         "<SOURCE_DIR>/configure"
         "--srcdir=<SOURCE_DIR>"
         --disable-shared
+        ${RUBY186_CONFIGURE_PLATFORM_ARGS}
     BUILD_COMMAND
         "${RUBY186_MAKE_PROGRAM}" "-j${RUBY186_BUILD_JOBS}"
     INSTALL_COMMAND ""

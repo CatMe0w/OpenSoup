@@ -1,4 +1,4 @@
-// OpenSoup MVP: transparent desktop scene with per-pixel
+// OpenSoup: transparent desktop scene with per-pixel
 // click-through, rendering via sokol_gfx (Metal). No sokol_app: window
 // management is our own, since click-through overlays are the whole point.
 #import <Cocoa/Cocoa.h>
@@ -237,7 +237,7 @@ static float down_pos[2];
     const int n = demo_load(assets_root);
     const bool toybox_ok = toybox_init(assets_root, view.drawableSize.width,
                                        view.drawableSize.height);
-    NSLog(@"OpenSoup MVP up: %d demo toys, Toybox %s (%d icons) from %s; drag them, empty space clicks through, Esc quits",
+    NSLog(@"OpenSoup up: %d demo toys, Toybox %s (%d icons) from %s; drag them, empty space clicks through, Esc quits",
           n, toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
           assets_root);
 
