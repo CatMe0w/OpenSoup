@@ -30,7 +30,11 @@ static void fake_sprite_remove(int sprite, void* user) {
 }
 
 int main(int argc, char** argv) {
-    const char* assets = argc > 1 ? argv[1] : "private/extracted";
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <assets-root>\n", argv[0]);
+        return 2;
+    }
+    const char* assets = argv[1];
     char path[1024];
 
     // Original IconGrid uniform-mode trajectory: mass=1, anchor k=300/c=25,

@@ -48,12 +48,16 @@ if(APPLE)
         src/audio.c
         src/rubyhost.c
         vendor/cjson/cJSON.c
+        src/macos/app_paths.m
         src/macos/main_macos.m
         src/macos/sokol_impl.m
     )
     target_include_directories(opensoup PRIVATE
         "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}" src)
-    set_source_files_properties(src/macos/main_macos.m PROPERTIES
+    set_source_files_properties(
+        src/macos/app_paths.m
+        src/macos/main_macos.m
+        PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc"
     )
     set_source_files_properties(src/rubyhost.c PROPERTIES

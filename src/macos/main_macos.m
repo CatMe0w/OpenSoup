@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 
+#include "app_paths.h"
 #include "scene.h"
 #include "audio.h"
 #include "demo.h"
@@ -16,9 +17,99 @@ static NSWindow* window;
 static MTKView* view;
 static id<MTLDevice> mtl_device;
 static id view_delegate; // MTKView.delegate is weak, keep it alive here
-static const char* assets_root = "private/extracted"; // temporary, remove once we have a proper asset pipeline
+static const char* assets_root;
 static CFTimeInterval last_frame_time;
 static NSString* const app_name = @"OpenSoup";
+
+static NSString* opensoup_folder_path(void) {
+    NSString* assets = [NSString stringWithUTF8String:assets_root];
+    return [assets stringByDeletingLastPathComponent];
+}
+
+static void open_opensoup_folder(void) {
+    [[NSWorkspace sharedWorkspace]
+        openURL:[NSURL fileURLWithPath:opensoup_folder_path()
+                         isDirectory:YES]];
+}
+
+@interface AppMenuActions : NSObject
+- (void)openOpenSoupFolder:(id)sender;
+@end
+
+@implementation AppMenuActions
+- (void)openOpenSoupFolder:(id)sender {
+    (void)sender;
+    open_opensoup_folder();
+}
+@end
+
+static AppMenuActions* app_menu_actions;
+
+static void prepare_modal_ui(void) {
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+}
+
+static void show_quit_alert(NSString* message, NSString* information) {
+    prepare_modal_ui();
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = message;
+    alert.informativeText = information;
+    [alert addButtonWithTitle:@"Quit"];
+    [alert runModal];
+}
+
+static void show_missing_asset_alert(app_assets_state state) {
+    NSString* name = nil;
+    if (state == APP_ASSETS_TOYDEFS_MISSING) {
+        name = @"toydefs.json";
+    } else if (state == APP_ASSETS_CORE_MISSING) {
+        name = @"souptoys_core_toy";
+    } else {
+        return;
+    }
+
+    NSString* root = [NSString stringWithUTF8String:assets_root];
+    NSString* missing = [root stringByAppendingPathComponent:name];
+    prepare_modal_ui();
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = @"Required game asset not found";
+    alert.informativeText = [NSString stringWithFormat:
+        @"OpenSoup could not find the required asset at:\n\n%@", missing];
+    [alert addButtonWithTitle:@"Open Folder and Quit"];
+    [alert addButtonWithTitle:@"Quit"];
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        open_opensoup_folder();
+    }
+}
+
+static void show_assets_directory_creation_alert(void) {
+    NSString* path = [NSString stringWithUTF8String:assets_root];
+    show_quit_alert(@"Assets folder could not be created",
+        [NSString stringWithFormat:
+            @"OpenSoup could not create its assets folder at:\n\n%@", path]);
+}
+
+static void show_installer_picker(void) {
+    prepare_modal_ui();
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    panel.title = @"Select the original Souptoys installer";
+    panel.message = @"Select the original Souptoys installer (.exe) to set up OpenSoup's game assets.";
+    panel.prompt = @"Select Installer";
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    panel.allowedFileTypes = @[@"exe"];
+#pragma clang diagnostic pop
+
+    // The selected installer is intentionally not consumed yet.
+    [panel runModal];
+}
 
 static NSRect visible_scene_frame(void) {
     NSScreen* screen = window.screen ?: NSScreen.mainScreen;
@@ -32,6 +123,13 @@ static void setup_app_menu(void) {
     [main_menu addItem:app_menu_item];
 
     NSMenu* app_menu = [[NSMenu alloc] initWithTitle:app_name];
+    app_menu_actions = [[AppMenuActions alloc] init];
+    NSMenuItem* open_folder = [app_menu
+        addItemWithTitle:@"Open OpenSoup Folder"
+                   action:@selector(openOpenSoupFolder:)
+            keyEquivalent:@""];
+    open_folder.target = app_menu_actions;
+    [app_menu addItem:[NSMenuItem separatorItem]];
     [app_menu addItemWithTitle:[@"Quit " stringByAppendingString:app_name]
                         action:@selector(terminate:)
                  keyEquivalent:@"q"];
@@ -256,12 +354,30 @@ static float down_pos[2];
 }
 @end
 
-int main(int argc, char** argv) {
+int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0); // keep demo printfs visible when piped
-    for (int i = 1; i < argc - 1; i++) {
-        if (strcmp(argv[i], "--assets") == 0) {
-            assets_root = argv[i + 1];
+    assets_root = app_assets_root();
+    if (!assets_root) {
+        fprintf(stderr, "cannot resolve the assets path\n");
+        return 1;
+    }
+    const app_assets_state state = app_assets_get_state();
+    if (state == APP_ASSETS_DIRECTORY_MISSING) {
+        @autoreleasepool {
+            // XXX: create directory after picker returns a valid installer
+            if (app_assets_create_directory()) {
+                show_installer_picker();
+            } else {
+                show_assets_directory_creation_alert();
+            }
         }
+        return 1; // TODO
+    }
+    if (state != APP_ASSETS_READY) {
+        @autoreleasepool {
+            show_missing_asset_alert(state);
+        }
+        return 1;
     }
     // Ruby boot from main: 1.8's conservative GC records the stack base at
     // ruby_init, so init must sit at least as shallow as any later Ruby call.
