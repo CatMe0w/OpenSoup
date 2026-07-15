@@ -3,13 +3,14 @@
 #include <stdint.h>
 #include "sokol_gfx.h"
 
-// Platform-agnostic scene. Coordinates are DEVICE PIXELS, origin top-left,
-// y-down (the original engine's canvas space, GDI convention). The platform
-// layer converts window points to device pixels once; NDC only exists inside
-// the vertex shader.
+// Platform-agnostic scene. View/canvas/sprite coordinates are LOGICAL PIXELS,
+// origin top-left, y-down (the original engine's GDI convention). Physics is
+// metres, origin bottom-left, y-up. Backing pixels are confined to the final
+// logical-viewport -> swapchain mapping; NDC only exists in the vertex shader.
 
 void scene_setup(const sg_environment* env);
-void scene_frame(const sg_swapchain* swapchain, double dt_ms);
+void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
+                 double dt_ms);
 void scene_shutdown(void);
 
 // Register a sprite; returns a STABLE sprite id (draw order may be

@@ -240,7 +240,15 @@ int main(int argc, char** argv) {
             "  ' walls=' + ls.map {|l| format('%g,%g', l.position.x, l.position.y)}.join(' ')\n"
             "raise 'right wall' unless (ls[1].position.x - 12.8).abs < 1e-6\n"
             "raise 'ceiling' unless (ls[3].position.y - 8.0).abs < 1e-6\n"
-            "raise 'scale not refit' unless ($default_engine.scale - 100.0).abs < 1e-6\n",
+            "raise 'scale not refit' unless ($default_engine.scale - 100.0).abs < 1e-6\n"
+            "top = $default_engine.view_to_scene(Vector[0, 0])\n"
+            "bottom = $default_engine.view_to_scene(Vector[0, 800])\n"
+            "raise 'view top is not scene up' unless (top.y - 8.0).abs < 1e-6\n"
+            "raise 'view bottom is not scene floor' unless bottom.y.abs < 1e-6\n"
+            "p = Vector[321, 654]\n"
+            "q = $default_engine.scene_to_view($default_engine.view_to_scene(p))\n"
+            "raise 'view/scene round trip' unless (q - p).r < 1e-6\n"
+            "STDERR.puts 'rubyboot: coordinates logical y-down <-> scene y-up'\n",
             "world verification");
     }
 

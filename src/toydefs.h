@@ -8,9 +8,9 @@
 //
 // Units: geometry (rest positions, shape points, joint anchors) is in
 // TOY-LOCAL units; instantiation scales by base_scale into world meters
-// (inertiaTensor scales by base_scale^2). Sprite centre-of-mass offsets are
-// sprite pixels, y-down, relative to the canvas centre; the FLC rotation
-// frames are pre-rendered about that canvas point.
+// (inertiaTensor scales by base_scale^2). Sprite centre-of-mass offsets use
+// pixel-sized units but are limb-local y-up vectors from the body origin to
+// the visual centre; FLC rotation frames are pre-rendered about that point.
 
 typedef struct {
     float x, y, r; // unified vertex encoding: circle = 1 point with radius

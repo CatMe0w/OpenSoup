@@ -6,7 +6,7 @@
 // fixed dt=0.01, gravity=-18, momentum-space state, RK4 position integration,
 // impulse contacts against world walls and other toys, spring joints
 // (sub_532800 form).
-// World space: meters (1 unit = 100 device pixels), origin bottom-left, y-up.
+// World space: meters (1 unit = 100 logical pixels), origin bottom-left, y-up.
 //
 // Bodies retain the original shape boundaries and memberOf groups. Narrowphase
 // is the original vertex-vs-edge model over the .toy swept-circle vertices.

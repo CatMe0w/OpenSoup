@@ -19,16 +19,16 @@ typedef struct texture_t {
 
 typedef struct {
     int id;     // stable handle handed to callers; draw order reorders freely
-    float x, y; // fractional position lives here; blit position is trunc'd
+    float x, y; // logical-pixel top-left; blit position is trunc'd
     int w, h;               // source texture dimensions
-    float draw_w, draw_h;   // destination dimensions
+    float draw_w, draw_h;   // logical-pixel destination dimensions
     int nframes;
     int frame;
     int speed_ms;
     double acc_ms;
     texture_t* texture;    // shared by every instance of the same decoded asset
     int body;               // physics body index or -1
-    float ax, ay;           // body origin in canvas px relative to centre, y-down
+    float ax, ay;           // body origin -> visual centre, logical px, y-up
     int group;              // toy group; grabbed together, raised together
     int layer;              // higher layers draw and hit-test above lower ones
     float alpha;
@@ -36,7 +36,7 @@ typedef struct {
     bool visible;
     bool animate;
     bool clip_enabled;
-    float clip[4];          // x, y, w, h in device pixels, top-left origin
+    float clip[4];          // logical x, y, w, h, top-left origin
 } sprite_t;
 
 typedef struct {
@@ -57,7 +57,6 @@ static struct {
     int sprite_cap;
     int next_id;
     texture_t* textures;
-    float view_h;       // device px, for world<->view y flip
 } state;
 
 static bool grow_sprites(int wanted) {
@@ -157,12 +156,12 @@ static sprite_t* by_id(int id) {
     return NULL;
 }
 
-// world (meters, y-up, origin bottom-left) <-> view (device px, y-down)
+// world (meters, y-up, origin bottom-left) -> view (logical px, y-down)
 // FLC frames rotate about the CANVAS CENTRE (verified: rotated frames' art
 // bboxes stay symmetric about it); objectCentreOfMass is the vector from the
 // body origin to that visual centre, a material point of the limb - so the
 // offset ROTATES with the body's orientation.
-static void body_to_sprite(sprite_t* s) {
+static void body_to_sprite(sprite_t* s, float view_h) {
     float wx, wy;
     phys_body_pos(s->body, &wx, &wy);
     const float th = phys_body_orientation(s->body);
@@ -170,7 +169,7 @@ static void body_to_sprite(sprite_t* s) {
     const float ox = c * s->ax - sn * s->ay; // px, y-up world sense
     const float oy = sn * s->ax + c * s->ay;
     s->x = wx * PHYS_PX_PER_UNIT + ox - (float)s->w / 2.0f;
-    s->y = state.view_h - wy * PHYS_PX_PER_UNIT - oy - (float)s->h / 2.0f;
+    s->y = view_h - wy * PHYS_PX_PER_UNIT - oy - (float)s->h / 2.0f;
 }
 
 void scene_setup(const sg_environment* env) {
@@ -188,10 +187,11 @@ void scene_setup(const sg_environment* env) {
     const float corners[] = { 0, 0, 1, 0, 0, 1, 1, 1 };
     state.quad = sg_make_buffer(&(sg_buffer_desc){ .data = SG_RANGE(corners) });
 
-    // 1:1 texel-to-pixel is the contract; nearest filtering enforces it
+    // Smooth original 1x assets when the logical viewport is rasterized into
+    // a higher-resolution backing drawable
     state.smp = sg_make_sampler(&(sg_sampler_desc){
-        .min_filter = SG_FILTER_NEAREST,
-        .mag_filter = SG_FILTER_NEAREST,
+        .min_filter = SG_FILTER_LINEAR,
+        .mag_filter = SG_FILTER_LINEAR,
         .wrap_u = SG_WRAP_REPEAT,
         .wrap_v = SG_WRAP_REPEAT,
     });
@@ -421,14 +421,43 @@ void scene_sprite_remove(int sprite) {
     state.nsprites--;
 }
 
-void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
+static int clamp_int(int value, int min, int max) {
+    return value < min ? min : (value > max ? max : value);
+}
+
+// Sokol scissor rectangles are expressed in render-target pixels. Everything
+// above this boundary remains in logical pixels, including hit-testing.
+static bool apply_logical_scissor(const sg_swapchain* swapchain,
+                                  float view_w, float view_h,
+                                  const float clip[4]) {
+    const float sx = (float)swapchain->width / view_w;
+    const float sy = (float)swapchain->height / view_h;
+    int x0 = (int)floorf(clip[0] * sx);
+    int y0 = (int)floorf(clip[1] * sy);
+    int x1 = (int)ceilf((clip[0] + clip[2]) * sx);
+    int y1 = (int)ceilf((clip[1] + clip[3]) * sy);
+    x0 = clamp_int(x0, 0, swapchain->width);
+    y0 = clamp_int(y0, 0, swapchain->height);
+    x1 = clamp_int(x1, 0, swapchain->width);
+    y1 = clamp_int(y1, 0, swapchain->height);
+    if (x1 <= x0 || y1 <= y0) {
+        return false;
+    }
+    sg_apply_scissor_rect(x0, y0, x1 - x0, y1 - y0, true);
+    return true;
+}
+
+void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
+                 double dt_ms) {
+    if (view_w <= 0.0f || view_h <= 0.0f) {
+        return;
+    }
     // physics stepping and world extents now live in the Ruby heartbeat
     // (rbh_frame / rbh_screen_size); the scene only renders and hit-tests
-    state.view_h = (float)swapchain->height;
     for (int i = 0; i < state.nsprites; i++) {
         sprite_t* s = &state.sprites[i];
         if (s->body >= 0) { // grabbed sprites follow too: the spring moves them
-            body_to_sprite(s);
+            body_to_sprite(s, view_h);
             if (s->nframes > 1) {
                 // FLC frames are pre-rendered ROTATION phases (GDI can't rotate
                 // bitmaps): frame = f(orientation), not a timed animation.
@@ -458,8 +487,9 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
             continue;
         }
         if (s->clip_enabled) {
-            sg_apply_scissor_rect((int)s->clip[0], (int)s->clip[1],
-                                  (int)s->clip[2], (int)s->clip[3], true);
+            if (!apply_logical_scissor(swapchain, view_w, view_h, s->clip)) {
+                continue;
+            }
         } else {
             sg_apply_scissor_rect(0, 0, swapchain->width, swapchain->height,
                                   true);
@@ -469,7 +499,7 @@ void scene_frame(const sg_swapchain* swapchain, double dt_ms) {
             // (Toybox.exe converts via fldcw 0xC00 fistp / __ftol2_sse)
             .pos = { (float)(int)s->x, (float)(int)s->y },
             .size = { s->draw_w, s->draw_h },
-            .viewport = { (float)swapchain->width, (float)swapchain->height },
+            .viewport = { view_w, view_h },
             .uv_scale = { s->uv_scale[0], s->uv_scale[1] },
             .tint = { s->alpha, s->alpha, s->alpha, s->alpha },
         };

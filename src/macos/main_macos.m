@@ -154,13 +154,13 @@ static void setup_app_menu(void) {
     NSApp.mainMenu = main_menu;
 }
 
-// window points (bottom-left origin) -> device pixels (top-left origin),
-// the scene's coordinate space
-static void to_px(NSPoint p, float* x, float* y) {
-    const NSRect b = view.bounds;
-    const float scale = (float)window.backingScaleFactor;
-    *x = (float)p.x * scale;
-    *y = (float)(b.size.height - p.y) * scale;
+// Window coordinates -> OpenSoup view coordinates. OverlayView is flipped,
+// so convertPoint supplies logical pixels/points with a top-left origin and
+// y-down. Backing pixels never enter input, Ruby, Toybox, or hit-testing.
+static void to_view_point(NSPoint window_point, float* x, float* y) {
+    const NSPoint p = [view convertPoint:window_point fromView:nil];
+    *x = (float)p.x;
+    *y = (float)p.y;
 }
 
 @interface OverlayWindow : NSWindow
@@ -174,6 +174,9 @@ static void to_px(NSPoint p, float* x, float* y) {
 @interface OverlayView : MTKView
 @end
 @implementation OverlayView
+- (BOOL)isFlipped {
+    return YES;
+}
 - (BOOL)isOpaque {
     return NO;
 }
@@ -192,7 +195,7 @@ static int captured_sprite = -1;
 static float down_pos[2];
 - (void)mouseDown:(NSEvent*)event {
     float x, y;
-    to_px([event locationInWindow], &x, &y);
+    to_view_point([event locationInWindow], &x, &y);
     if (toybox_mouse_down(x, y)) {
         captured_sprite = -1;
         return;
@@ -208,7 +211,7 @@ static float down_pos[2];
 }
 - (void)mouseDragged:(NSEvent*)event {
     float x, y;
-    to_px([event locationInWindow], &x, &y);
+    to_view_point([event locationInWindow], &x, &y);
     if (toybox_capturing()) {
         toybox_mouse_dragged(x, y);
     } else if (captured_sprite >= 0) {
@@ -217,7 +220,7 @@ static float down_pos[2];
 }
 - (void)mouseUp:(NSEvent*)event {
     float x, y;
-    to_px([event locationInWindow], &x, &y);
+    to_view_point([event locationInWindow], &x, &y);
     if (toybox_capturing()) {
         toybox_mouse_up(x, y);
     } else if (captured_sprite >= 0) {
@@ -236,15 +239,12 @@ static float down_pos[2];
 }
 - (void)scrollWheel:(NSEvent*)event {
     float x, y;
-    to_px([event locationInWindow], &x, &y);
+    to_view_point([event locationInWindow], &x, &y);
     if (toybox_hit_test(x, y)) {
         const bool precise = event.hasPreciseScrollingDeltas;
-        float delta_y = (float)event.scrollingDeltaY;
-        if (precise) {
-            // Toybox coordinates and layout are in backing/device pixels.
-            delta_y *= (float)window.backingScaleFactor;
-        }
-        toybox_scroll(delta_y, precise);
+        // AppKit reports precise scrolling deltas in points, which are already
+        // OpenSoup's logical view units. Non-precise deltas remain detents.
+        toybox_scroll((float)event.scrollingDeltaY, precise);
     }
 }
 @end
@@ -253,19 +253,20 @@ static float down_pos[2];
 @end
 @implementation OverlayViewDelegate
 - (void)mtkView:(nonnull MTKView*)v drawableSizeWillChange:(CGSize)size {
-    (void)v;
-    rbh_screen_size(size.width, size.height);
-    toybox_resize(size.width, size.height);
+    (void)size;
+    const NSSize logical_size = v.bounds.size;
+    rbh_screen_size(logical_size.width, logical_size.height);
+    toybox_resize(logical_size.width, logical_size.height);
 }
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
         // per-pixel click-through: poll the global cursor, hit-test the
         // scene, toggle ignoresMouseEvents. Never toggle mid-drag.
         if (captured_sprite < 0 && !toybox_capturing()) {
-            const NSPoint p = [NSEvent mouseLocation];
-            const NSRect f = window.frame;
+            const NSPoint p = [window
+                convertPointFromScreen:[NSEvent mouseLocation]];
             float x, y;
-            to_px(NSMakePoint(p.x - f.origin.x, p.y - f.origin.y), &x, &y);
+            to_view_point(p, &x, &y);
             toybox_pointer_move(x, y);
             window.ignoresMouseEvents =
                 !(toybox_hit_test(x, y) || scene_hit_test(x, y));
@@ -293,7 +294,9 @@ static float down_pos[2];
                 .current_drawable = (__bridge const void*)v.currentDrawable,
             },
         };
-        scene_frame(&swapchain, dt_ms);
+        const NSSize logical_size = v.bounds.size;
+        scene_frame(&swapchain, (float)logical_size.width,
+                    (float)logical_size.height, dt_ms);
     }
 }
 @end
@@ -343,12 +346,14 @@ static float down_pos[2];
     };
     scene_setup(&env);
 
-    // world extents must be known before toys spawn
-    rbh_screen_size(view.drawableSize.width, view.drawableSize.height);
+    // World extents and original 1x assets use logical pixels. drawableSize
+    // is backing pixels and only belongs to the Metal swapchain.
+    const NSSize logical_size = view.bounds.size;
+    rbh_screen_size(logical_size.width, logical_size.height);
 
     toyvisuals_init(assets_root);
-    const bool toybox_ok = toybox_init(assets_root, view.drawableSize.width,
-                                       view.drawableSize.height);
+    const bool toybox_ok = toybox_init(assets_root, logical_size.width,
+                                       logical_size.height);
     NSLog(@"OpenSoup up: Toybox %s (%d icons) from %s",
           toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
           assets_root);

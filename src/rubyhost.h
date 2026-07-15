@@ -36,7 +36,7 @@ void rbh_set_sprite_hook(rbh_sprite_fn fn, rbh_sprite_remove_fn remove_fn,
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m);
 
-// Convert device-pixel view coordinates to the default engine's scene space.
+// Convert logical-pixel, y-down view coordinates to scene metres, y-up.
 // Used by non-Ruby UI (Toybox drag/drop) before handing a spawn to Ruby.
 bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m);
 
@@ -49,7 +49,7 @@ bool rbh_load_toy_class(const char* class_name, const char* class_dir);
 void rbh_frame(double dt_ms);
 
 // Mouse dispatch. sprite = the scene sprite id the app picked (alpha
-// hit-test); coordinates are view space (device px, y-down). Events run
+// hit-test); coordinates are view space (logical px, y-down). Events run
 // the framework chain: Sprite#internal_mouse_* -> bubble -> default grab.
 void rbh_mouse_down(int sprite, double x_px, double y_px, int button);
 void rbh_mouse_move(int sprite, double x_px, double y_px, int button,
@@ -67,7 +67,7 @@ bool rbh_recycle_sprite(int sprite);
 // notify toys with on_clear hooks, then remove every non-sticky scene toy.
 bool rbh_clear_scene(void);
 
-// Report the view size in device pixels. Fires $core.screen_size_changed;
+// Report the view size in logical pixels. Fires $core.screen_size_changed;
 // engines with fit_to_screen re-derive canvas/scene rects, which lands in
 // phys_set_world via the scene_walls_changed chain.
 void rbh_screen_size(double w_px, double h_px);

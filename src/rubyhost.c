@@ -975,9 +975,10 @@ static VALUE eng_screen_br(VALUE self) {
     return vec_new(g_screen_w, g_screen_h);
 }
 
-// Coordinate spaces: view/screen = device px y-down; canvas = px y-down with
-// origin at the canvas rect's top-left; scene = meters y-up, scene_top_right
-// stored NEGATED (framework convention). scale = px per scene unit.
+// Coordinate spaces: view/screen = logical px y-down; canvas = logical px
+// y-down with origin at the canvas rect's top-left; scene = meters y-up,
+// scene_top_right stored NEGATED (framework convention). scale = logical px
+// per scene unit. Backing pixels are never visible to Ruby.
 static VALUE eng_view_to_canvas(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
     double x, y;

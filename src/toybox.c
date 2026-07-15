@@ -852,8 +852,8 @@ void toybox_scroll(float delta_y, bool precise) {
     // Win32's handler changes the normalized model by
     // wheel_delta * IconToy#scroll_increment / WHEEL_DELTA.  A non-precise
     // Cocoa wheel delta is one detent; the Ruby increment is one 0.8m/80px
-    // icon row. Precise trackpad deltas (including momentum events) have
-    // already been converted to device pixels by the platform layer.
+    // icon row. AppKit supplies precise trackpad deltas (including momentum
+    // events) directly in logical points.
     const float delta = precise ? delta_y : delta_y * TB_CELL_H;
     const float target = fminf(fmaxf(tb.scroll.target - delta, 0.0f),
                                tb.max_scroll);
