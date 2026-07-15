@@ -111,6 +111,28 @@ static NSRect visible_scene_frame(void) {
     return screen.visibleFrame;
 }
 
+static NSInteger preferred_fps_for_current_screen(void) {
+    NSScreen* screen = window.screen ?: NSScreen.mainScreen;
+    if (@available(macOS 12.0, *)) {
+        const NSInteger fps = screen.maximumFramesPerSecond;
+        if (fps > 0) {
+            return fps;
+        }
+    }
+    return 60;
+}
+
+static void update_preferred_fps(void) {
+    if (!view) {
+        return;
+    }
+    const NSInteger fps = preferred_fps_for_current_screen();
+    if (view.preferredFramesPerSecond != fps) {
+        view.preferredFramesPerSecond = fps;
+        NSLog(@"Display frame-rate preference: %ld FPS", (long)fps);
+    }
+}
+
 static void setup_app_menu(void) {
     NSMenu* main_menu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem* app_menu_item = [[NSMenuItem alloc]
@@ -251,7 +273,8 @@ static float down_pos[2];
             window.ignoresMouseEvents = NO;
         }
         const CFTimeInterval now = CACurrentMediaTime();
-        const double dt_ms = last_frame_time > 0 ? (now - last_frame_time) * 1000.0 : 16.7;
+        const double dt_ms = last_frame_time > 0
+                           ? (now - last_frame_time) * 1000.0 : 0.0;
         last_frame_time = now;
         rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
         toybox_frame(dt_ms);
@@ -275,7 +298,7 @@ static float down_pos[2];
 }
 @end
 
-@interface OverlayAppDelegate : NSObject<NSApplicationDelegate>
+@interface OverlayAppDelegate : NSObject<NSApplicationDelegate, NSWindowDelegate>
 @end
 @implementation OverlayAppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
@@ -293,6 +316,7 @@ static float down_pos[2];
     window.hasShadow = NO;
     window.ignoresMouseEvents = YES;
     window.title = app_name;
+    window.delegate = self;
 
     mtl_device = MTLCreateSystemDefaultDevice();
     const NSRect view_rect = NSMakeRect(0, 0, screen_rect.size.width,
@@ -301,11 +325,11 @@ static float down_pos[2];
     view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     view.depthStencilPixelFormat = MTLPixelFormatInvalid;
     view.sampleCount = 1;
-    view.preferredFramesPerSecond = 60;
     view.layer.opaque = NO;
     view_delegate = [[OverlayViewDelegate alloc] init];
     view.delegate = view_delegate;
     window.contentView = view;
+    update_preferred_fps();
 
     const sg_environment env = {
         .defaults = {
@@ -334,6 +358,11 @@ static float down_pos[2];
 - (void)applicationDidChangeScreenParameters:(NSNotification*)note {
     (void)note;
     [window setFrame:visible_scene_frame() display:YES];
+    update_preferred_fps();
+}
+- (void)windowDidChangeScreen:(NSNotification*)note {
+    (void)note;
+    update_preferred_fps();
 }
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
