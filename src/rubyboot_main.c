@@ -306,6 +306,36 @@ int main(int argc, char** argv) {
             "toy collision + trigger verification");
     }
 
+    // Within one toy, localCollisionGroup is an allow-list: shapes with the
+    // same group may collide, while shapes in different groups must not. The
+    // shipped WSkate intentionally overlaps its deck (group 0) and wheels
+    // (group 1), making an inverted filter immediately visible.
+    if (ok) {
+        char dir[1200];
+        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        ok = rbh_load_toy_class("WSkate", dir)
+          && rbh_spawn_toy("WSkate", dir, 6.0, 5.0);
+    }
+    if (ok) {
+        ok = rbh_eval(
+            "skate = $default_engine.toys.find {|t| t.toy_id == 'WSkate'}\n"
+            "raise 'rollerskate missing' unless skate\n"
+            "deck = skate.limbs.by_sid(:Skate)\n"
+            "left = skate.limbs.by_sid(:\"Left Wheel\")\n"
+            "right = skate.limbs.by_sid(:\"Right Wheel\")\n"
+            "raise 'rollerskate limbs missing' unless deck && left && right\n"
+            "deck_shape = deck.shapes.first\n"
+            "left_shape = left.shapes.first\n"
+            "right_shape = right.shapes.first\n"
+            "left.position = deck.position\n"
+            "raise 'different local collision groups collided' if deck_shape.triggers_overlapping(:bouncers).include?(left_shape)\n"
+            "right.position = left.position\n"
+            "raise 'equal local collision groups did not collide' unless left_shape.triggers_overlapping(:bouncers).include?(right_shape)\n"
+            "$default_engine.toys.remove(skate)\n"
+            "STDERR.puts 'rubyboot: local collision groups match original allow-list semantics'\n",
+            "local collision group verification");
+    }
+
     // Real shipped script integration: SnowballLarge watches :floor and must
     // replace itself with four SnowballSmall instances on first overlap.
     if (ok) {

@@ -553,10 +553,10 @@ static int pair_contacts(const body_t* a, const bstate_t* sa,
     return n;
 }
 
-static bool bodies_filtered(const body_t* a, const body_t* b) {
-    return a->dead || b->dead || a == b
-        || (a->prm.toy_id == b->prm.toy_id
-            && a->prm.local_group == b->prm.local_group);
+static bool bodies_can_collide(const body_t* a, const body_t* b) {
+    return !a->dead && !b->dead && a != b
+        && (a->prm.toy_id != b->prm.toy_id
+            || a->prm.local_group == b->prm.local_group);
 }
 
 static void derive_toy_contacts(int ai, const bstate_t* sa, bstate_t* d) {
@@ -564,7 +564,7 @@ static void derive_toy_contacts(int ai, const bstate_t* sa, bstate_t* d) {
     contact_t contacts[MAX_PAIR_CONTACTS];
     for (int bi = 0; bi < P.nbodies; bi++) {
         const body_t* b = &P.bodies[bi];
-        if (bodies_filtered(a, b)) continue;
+        if (!bodies_can_collide(a, b)) continue;
         const int n = pair_contacts(a, sa, b, &P.rk_y[bi], contacts,
                                     MAX_PAIR_CONTACTS);
         for (int i = 0; i < n; i++) {
@@ -626,7 +626,7 @@ static void solve_friction(body_t* b) {
         contact_t contacts[MAX_PAIR_CONTACTS];
         for (int bi = 0; bi < P.nbodies; bi++) {
             body_t* other = &P.bodies[bi];
-            if (bodies_filtered(b, other)) continue;
+            if (!bodies_can_collide(b, other)) continue;
             const bstate_t sb = { other->px, other->py, other->theta,
                                   other->mx, other->my, other->L };
             const int n = pair_contacts(b, &sa, other, &sb, contacts,
@@ -908,7 +908,7 @@ bool phys_shapes_overlap(int body1, int shape1, int body2, int shape2) {
     const body_t* b = &P.bodies[body2];
     if (shape1 < 0 || shape1 >= a->nshapes
         || shape2 < 0 || shape2 >= b->nshapes
-        || bodies_filtered(a, b)) {
+        || !bodies_can_collide(a, b)) {
         return false;
     }
     const phys_shape* ash = &a->shapes[shape1];

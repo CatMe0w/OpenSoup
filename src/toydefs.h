@@ -51,7 +51,7 @@ typedef struct {
     bool fixed_rotate;
     bool default_grab_move;
     bool default_grab_rotate;
-    char* local_collision_group; // only filters equal groups within one toy
+    char* local_collision_group; // within one toy, only equal groups collide
     // material: velocityResponse, stiffness, dampener, kineticFriction, staticFriction
     float material[5];
     float motor_force[2]; // summed linearMotors, limb-local

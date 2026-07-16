@@ -71,7 +71,7 @@ typedef struct {
     // (original combines self+self, then scales by the mass ratio).
     float material[5];
     int toy_id;              // collision-group filtering is toy-local
-    uint32_t local_group;    // stable hash of localCollisionGroup
+    uint32_t local_group;    // same-toy collision requires equal group hashes
 } phys_params;
 
 void phys_set_world(float width, float height); // wall extents, meters
