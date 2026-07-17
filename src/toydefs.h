@@ -123,6 +123,7 @@ typedef struct {
 bool toydefs_load(const char* json_path);
 const toydef_t* toydefs_find(const char* class_name);
 int toydefs_count(void);
+const toydef_t* toydefs_at(int index);
 int toydefs_icon_count(void);
 const toyicon_t* toydefs_icon_at(int index);
 int toydefs_pack_count(void);

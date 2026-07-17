@@ -28,6 +28,25 @@ bool opensoup_boot(const char* assets_root) {
         return false;
     }
     printf("opensoup: Ruby framework booted\n");
+
+    // Classes referenced by other toys' scripts (Goose -> GooseEgg,
+    // SnowballCannon -> SnowballLarge) must resolve before those scripts
+    // run, so preload every def's class up front. Defs without a script
+    // resolve to plain Toy subclasses, same as loading them on drop.
+    int preloaded = 0;
+    for (int i = 0; i < toydefs_count(); i++) {
+        const toydef_t* d = toydefs_at(i);
+        if (!d->class_name || !d->root) {
+            continue;
+        }
+        char dir[2048];
+        snprintf(dir, sizeof dir, "%s/%s", assets_root, d->root);
+        if (rbh_load_toy_class(d->class_name, dir)) {
+            preloaded++;
+        }
+    }
+    printf("opensoup: Preloaded %d/%d toy classes\n", preloaded,
+           toydefs_count());
     return true;
 }
 

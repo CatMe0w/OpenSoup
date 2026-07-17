@@ -286,6 +286,10 @@ int toydefs_count(void) {
     return ndefs;
 }
 
+const toydef_t* toydefs_at(int index) {
+    return index >= 0 && index < ndefs ? &defs[index] : NULL;
+}
+
 int toydefs_icon_count(void) {
     return nicons;
 }
