@@ -13,6 +13,20 @@ void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
                  double dt_ms);
 void scene_shutdown(void);
 
+// Group-id namespace. Groups are only ever compared for equality, but toy
+// instance ids grow without bound, so the partition is by sign:
+//   >= 1  toy sprites, group = the toy's instance id
+//   <  0  native UI clusters, fixed ids below
+#define SCENE_GROUP_TOY(instance_id) (instance_id)
+#define SCENE_GROUP_UI      (-1) // Toybox shell + catalog icons
+#define SCENE_GROUP_UI_DRAG (-2) // drag preview: own group so hit-test and
+                                 // raise treat it apart from the shell
+
+// Layer namespace: world sprites stay on the default layer, native UI above.
+#define SCENE_LAYER_WORLD 0
+#define SCENE_LAYER_UI 100
+#define SCENE_LAYER_UI_DRAG 110
+
 // Register a sprite; returns a STABLE sprite id (draw order may be
 // reordered internally, ids never change). frames are premultiplied RGBA8
 // (top-left origin); the scene keeps the pointers borrowed for alpha

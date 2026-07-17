@@ -16,9 +16,6 @@
 #define TB_MAX_SHELL 24
 #define TB_MAX_PACKS 16
 #define TB_MAX_ICONS 192
-#define TB_UI_GROUP 900000
-#define TB_UI_LAYER 100
-#define TB_DRAG_LAYER 110
 
 #define TB_W 400.0f
 #define TB_H 460.0f
@@ -140,7 +137,7 @@ static bool asset_scene_add(tb_asset* a, float x, float y, int layer) {
         return false;
     }
     a->sprite = scene_sprite_add(a->w, a->h, a->nframes, a->frames, 0,
-                                 x, y, TB_UI_GROUP);
+                                 x, y, SCENE_GROUP_UI);
     if (a->sprite < 0) {
         return false;
     }
@@ -172,7 +169,7 @@ static bool asset_load_sequence(tb_asset* a, const char* prefix,
         }
         a->frames[a->nframes++] = img.rgba;
     }
-    return asset_scene_add(a, x, y, TB_UI_LAYER);
+    return asset_scene_add(a, x, y, SCENE_LAYER_UI);
 }
 
 static bool asset_load_frame(tb_asset* a, const char* prefix, int frame,
@@ -189,7 +186,7 @@ static bool asset_load_frame(tb_asset* a, const char* prefix, int frame,
     a->h = img.h;
     a->nframes = 1;
     a->frames[0] = img.rgba;
-    return asset_scene_add(a, x, y, TB_UI_LAYER);
+    return asset_scene_add(a, x, y, SCENE_LAYER_UI);
 }
 
 static bool asset_load_flc(tb_asset* a, const char* color_rel,
@@ -217,7 +214,7 @@ static bool asset_load_flc(tb_asset* a, const char* color_rel,
         free(anim.frames[i]);
     }
     free(anim.frames);
-    return asset_scene_add(a, x, y, TB_UI_LAYER);
+    return asset_scene_add(a, x, y, SCENE_LAYER_UI);
 }
 
 static void asset_destroy(tb_asset* a) {
@@ -562,11 +559,11 @@ static void preview_create(int index, float x, float y) {
     const tb_asset* a = &tb.icons[index].asset;
     tb.preview_sprite = scene_sprite_add(a->w, a->h, a->nframes, a->frames,
                                          0, x - a->w * 0.5f,
-                                         y - a->h * 0.5f, TB_UI_GROUP + 1);
+                                         y - a->h * 0.5f, SCENE_GROUP_UI_DRAG);
     if (tb.preview_sprite >= 0) {
         scene_sprite_set_frame(tb.preview_sprite, 0);
         scene_sprite_set_alpha(tb.preview_sprite, 0.85f);
-        scene_sprite_set_layer(tb.preview_sprite, TB_DRAG_LAYER);
+        scene_sprite_set_layer(tb.preview_sprite, SCENE_LAYER_UI_DRAG);
     }
 }
 

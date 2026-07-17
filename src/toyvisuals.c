@@ -112,7 +112,7 @@ static cached_visual* visual_load(const char* path) {
 }
 
 // Visual half of Ruby-side toy realization: load the sprite's FLC and hand
-// it to the scene. group = toy instance id, offset to its own range.
+// it to the scene. group = toy instance id.
 static int ruby_sprite_hook(const char* image, int body, float com_x,
                             float com_y, int group, void* user) {
     const char* assets_root = user;
@@ -122,7 +122,7 @@ static int ruby_sprite_hook(const char* image, int body, float com_x,
     if (visual) {
         sprite = scene_sprite_add(visual->w, visual->h, visual->nframes,
                                   visual->frames, visual->speed_ms,
-                                  0, 0, 1000 + group);
+                                  0, 0, SCENE_GROUP_TOY(group));
     }
     if (sprite >= 0) {
         scene_sprite_bind_body(sprite, body, com_x, com_y);

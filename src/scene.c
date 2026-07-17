@@ -290,7 +290,7 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->ax = 0;
     s->ay = 0;
     s->group = group;
-    s->layer = 0;
+    s->layer = SCENE_LAYER_WORLD;
     s->alpha = 1.0f;
     s->uv_scale[0] = 1.0f;
     s->uv_scale[1] = 1.0f;
@@ -299,7 +299,7 @@ int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
     s->clip_enabled = false;
     const int id = s->id;
     // New world sprites may be created after the Toybox. Keep layers sorted
-    // so default layer 0 is inserted below any existing UI layer.
+    // so the default world layer is inserted below any existing UI layer.
     int at = state.nsprites - 1;
     while (at > 0 && state.sprites[at - 1].layer > state.sprites[at].layer) {
         const sprite_t tmp = state.sprites[at - 1];
