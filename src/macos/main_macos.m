@@ -1,17 +1,16 @@
-// OpenSoup: transparent desktop scene with per-pixel
+// OpenSoup macOS host: transparent desktop scene with per-pixel
 // click-through, rendering via sokol_gfx (Metal). No sokol_app: window
 // management is our own, since click-through overlays are the whole point.
+//
+// Application policy lives in opensoup.c; this file translates AppKit
+// events and applies the app's click-through/quit decisions to the window.
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 
 #include "app_paths.h"
+#include "opensoup.h"
 #include "scene.h"
-#include "audio.h"
-#include "rubyhost.h"
-#include "toydefs.h"
-#include "toybox.h"
-#include "sprite_hook.h"
 
 static NSWindow* window;
 static MTKView* view;
@@ -187,65 +186,29 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
     (void)event;
     return YES;
 }
-// mouse events route through Ruby: pick the sprite here (alpha test is
-// scene-side), then Sprite#internal_mouse_* bubbles the event and the
-// framework's default grab (limb.rb) drives engine.input_grab/move/release.
-// captured = the mouse-downed sprite, our stand-in for Win32 mouse capture.
-static int captured_sprite = -1;
-static float down_pos[2];
 - (void)mouseDown:(NSEvent*)event {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
-    if (toybox_mouse_down(x, y)) {
-        captured_sprite = -1;
-        return;
-    }
-    const int sprite = scene_pick(x, y);
-    if (sprite >= 0) {
-        scene_raise(sprite);
-        captured_sprite = sprite;
-        down_pos[0] = x;
-        down_pos[1] = y;
-        rbh_mouse_down(sprite, x, y, 1);
-    }
+    opensoup_mouse_down(x, y);
 }
 - (void)mouseDragged:(NSEvent*)event {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
-    if (toybox_capturing()) {
-        toybox_mouse_dragged(x, y);
-    } else if (captured_sprite >= 0) {
-        rbh_mouse_move(captured_sprite, x, y, 1, true);
-    }
+    opensoup_mouse_drag(x, y);
 }
 - (void)mouseUp:(NSEvent*)event {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
-    if (toybox_capturing()) {
-        toybox_mouse_up(x, y);
-    } else if (captured_sprite >= 0) {
-        const bool over_toybox = toybox_hit_test(x, y);
-        rbh_mouse_up(captured_sprite, x, y, 1);
-        const bool recycled = over_toybox
-                           && rbh_recycle_sprite(captured_sprite);
-        // barely-moved release = click (Win32 sends it on button release)
-        if (!over_toybox && !recycled
-            && fabsf(x - down_pos[0]) < 4
-            && fabsf(y - down_pos[1]) < 4) {
-            rbh_mouse_click(captured_sprite, x, y, 1);
-        }
-        captured_sprite = -1;
-    }
+    opensoup_mouse_up(x, y);
 }
 - (void)scrollWheel:(NSEvent*)event {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
-    if (toybox_hit_test(x, y)) {
-        const bool precise = event.hasPreciseScrollingDeltas;
-        // AppKit reports precise scrolling deltas in points, which are already
-        // OpenSoup's logical view units. Non-precise deltas remain detents.
-        toybox_scroll((float)event.scrollingDeltaY, precise);
-    }
+    // AppKit reports precise scrolling deltas in points, which are already
+    // OpenSoup's logical view units. Non-precise deltas remain detents.
+    // Trackpad momentum is supplied by the normal scroll event stream.
+    opensoup_scroll(x, y, (float)event.scrollingDeltaY,
+                    event.hasPreciseScrollingDeltas);
 }
 @end
 
@@ -255,31 +218,22 @@ static float down_pos[2];
 - (void)mtkView:(nonnull MTKView*)v drawableSizeWillChange:(CGSize)size {
     (void)size;
     const NSSize logical_size = v.bounds.size;
-    rbh_screen_size(logical_size.width, logical_size.height);
-    toybox_resize(logical_size.width, logical_size.height);
+    opensoup_resize(logical_size.width, logical_size.height);
 }
 - (void)drawInMTKView:(nonnull MTKView*)v {
     @autoreleasepool {
-        // per-pixel click-through: poll the global cursor, hit-test the
-        // scene, toggle ignoresMouseEvents. Never toggle mid-drag.
-        if (captured_sprite < 0 && !toybox_capturing()) {
-            const NSPoint p = [window
-                convertPointFromScreen:[NSEvent mouseLocation]];
-            float x, y;
-            to_view_point(p, &x, &y);
-            toybox_pointer_move(x, y);
-            window.ignoresMouseEvents =
-                !(toybox_hit_test(x, y) || scene_hit_test(x, y));
-        } else {
-            window.ignoresMouseEvents = NO;
-        }
+        const NSPoint p = [window
+            convertPointFromScreen:[NSEvent mouseLocation]];
+        float cx, cy;
+        to_view_point(p, &cx, &cy);
         const CFTimeInterval now = CACurrentMediaTime();
         const double dt_ms = last_frame_time > 0
                            ? (now - last_frame_time) * 1000.0 : 0.0;
         last_frame_time = now;
-        rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
-        toybox_frame(dt_ms);
-        if (toybox_quit_requested()) {
+
+        const opensoup_frame_result r = opensoup_frame(dt_ms, cx, cy, true);
+        window.ignoresMouseEvents = !r.wants_mouse;
+        if (r.quit) {
             [NSApp terminate:nil];
             return;
         }
@@ -349,14 +303,7 @@ static float down_pos[2];
     // World extents and original 1x assets use logical pixels. drawableSize
     // is backing pixels and only belongs to the Metal swapchain.
     const NSSize logical_size = view.bounds.size;
-    rbh_screen_size(logical_size.width, logical_size.height);
-
-    sprite_hook_install(assets_root);
-    const bool toybox_ok = toybox_init(assets_root, logical_size.width,
-                                       logical_size.height);
-    NSLog(@"OpenSoup up: Toybox %s (%d icons) from %s",
-          toybox_ok ? "ready" : "unavailable", toybox_catalog_count(),
-          assets_root);
+    opensoup_start(logical_size.width, logical_size.height);
 
     [window makeKeyAndOrderFront:nil];
 }
@@ -371,10 +318,7 @@ static float down_pos[2];
 }
 - (void)applicationWillTerminate:(NSNotification*)note {
     (void)note;
-    toybox_shutdown();
-    scene_shutdown();
-    rbh_shutdown();
-    audio_shutdown();
+    opensoup_shutdown();
 }
 @end
 
@@ -403,27 +347,14 @@ int main(void) {
         }
         return 1;
     }
-    // Ruby boot from main: 1.8's conservative GC records the stack base at
-    // ruby_init, so init must sit at least as shallow as any later Ruby call.
-    {
-        if (!audio_init(false)) {
-            NSLog(@"Audio output unavailable, continuing silent");
+    // see opensoup_boot for the Ruby 1.8 stack-base rule
+    if (!opensoup_boot(assets_root)) {
+        @autoreleasepool {
+            show_quit_alert(@"Ruby framework failed to start",
+                @"OpenSoup could not load the Souptoys Ruby framework. "
+                 "Check the Ruby scripts in the Assets folder.");
         }
-        char p[1024];
-        snprintf(p, sizeof p, "%s/toydefs.json", assets_root);
-        if (!toydefs_load(p)) {
-            fprintf(stderr, "toydefs.json missing at %s\n", p);
-        }
-        snprintf(p, sizeof p, "%s/souptoys_core_toy", assets_root);
-        if (!rbh_boot(p)) {
-            @autoreleasepool {
-                show_quit_alert(@"Ruby framework failed to start",
-                    @"OpenSoup could not load the Souptoys Ruby framework. "
-                     "Check the Ruby scripts in the Assets folder.");
-            }
-            return 1;
-        }
-        NSLog(@"Ruby framework booted");
+        return 1;
     }
     @autoreleasepool {
         NSProcessInfo.processInfo.processName = app_name;

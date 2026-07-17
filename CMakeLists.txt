@@ -36,6 +36,7 @@ if(APPLE)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ruby186.cmake")
 
     add_executable(opensoup MACOSX_BUNDLE
+        src/opensoup.c
         src/scene.c
         src/assets.c
         src/sprite_hook.c
