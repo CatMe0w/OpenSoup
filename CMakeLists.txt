@@ -38,7 +38,7 @@ if(APPLE)
     add_executable(opensoup MACOSX_BUNDLE
         src/scene.c
         src/assets.c
-        src/toyvisuals.c
+        src/sprite_hook.c
         src/toybox.c
         src/toybox_button.c
         src/toybox_scroll.c

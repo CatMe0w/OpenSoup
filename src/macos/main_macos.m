@@ -11,7 +11,7 @@
 #include "rubyhost.h"
 #include "toydefs.h"
 #include "toybox.h"
-#include "toyvisuals.h"
+#include "sprite_hook.h"
 
 static NSWindow* window;
 static MTKView* view;
@@ -351,7 +351,7 @@ static float down_pos[2];
     const NSSize logical_size = view.bounds.size;
     rbh_screen_size(logical_size.width, logical_size.height);
 
-    toyvisuals_init(assets_root);
+    sprite_hook_install(assets_root);
     const bool toybox_ok = toybox_init(assets_root, logical_size.width,
                                        logical_size.height);
     NSLog(@"OpenSoup up: Toybox %s (%d icons) from %s",

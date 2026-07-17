@@ -1,5 +1,5 @@
 // Visual bridge from Ruby-hosted toys to the native scene.
-#include "toyvisuals.h"
+#include "sprite_hook.h"
 #include "assets.h"
 #include "rubyhost.h"
 #include "scene.h"
@@ -127,7 +127,7 @@ static int ruby_sprite_hook(const char* image, int body, float com_x,
     if (sprite >= 0) {
         scene_sprite_bind_body(sprite, body, com_x, com_y);
     } else {
-        fprintf(stderr, "toyvisuals: failed to load %s\n", cpath);
+        fprintf(stderr, "sprite_hook: failed to load %s\n", cpath);
     }
     free(cpath);
     return sprite;
@@ -138,7 +138,7 @@ static void ruby_sprite_remove_hook(int sprite, void* user) {
     scene_sprite_remove(sprite);
 }
 
-void toyvisuals_init(const char* assets_root) {
+void sprite_hook_install(const char* assets_root) {
     rbh_set_sprite_hook(ruby_sprite_hook, ruby_sprite_remove_hook,
                         (void*)assets_root);
 }

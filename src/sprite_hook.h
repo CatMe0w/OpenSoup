@@ -1,4 +1,4 @@
 #pragma once
 
 // Install the visual callbacks used when rubyhost realizes toys.
-void toyvisuals_init(const char* assets_root);
+void sprite_hook_install(const char* assets_root);
