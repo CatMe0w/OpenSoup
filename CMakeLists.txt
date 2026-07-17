@@ -47,6 +47,11 @@ if(APPLE)
         src/toyphys.c
         src/audio.c
         src/rubyhost.c
+        src/rubyhost_engine.c
+        src/rubyhost_limb.c
+        src/rubyhost_node.c
+        src/rubyhost_realize.c
+        src/rubyhost_sound.c
         vendor/cjson/cJSON.c
         src/macos/app_paths.m
         src/macos/main_macos.m
@@ -88,6 +93,11 @@ if(APPLE)
         src/rubyboot_main.c
         src/assets.c
         src/rubyhost.c
+        src/rubyhost_engine.c
+        src/rubyhost_limb.c
+        src/rubyhost_node.c
+        src/rubyhost_realize.c
+        src/rubyhost_sound.c
         src/toybox_button.c
         src/toybox_scroll.c
         src/physics.c
