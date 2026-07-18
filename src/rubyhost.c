@@ -333,12 +333,12 @@ bool rbh_boot(const char* scripts_root) {
     }
     rb_gv_set("$engine", rb_obj_alloc(cls_find("Souptoys")));
 
-    if (!rbh_eval("$:.clear();", "load path reset")) {
+    char lp[sizeof g_root + 32];
+    snprintf(lp, sizeof lp, "$:.clear(); $: << '%s'", g_root);
+    if (!rbh_eval(lp, "load path reset")) {
         return false;
     }
 
-    // require 'matrix' has no filesystem to come from; feed e2mmap + matrix
-    // from resources, exactly like the original's fallback
     int state = 0;
     rb_eval_string_protect("require 'matrix'", &state);
     if (state) {
