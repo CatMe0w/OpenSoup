@@ -32,6 +32,23 @@ REPLACEMENTS = (
         bytes.fromhex("0f b6 85 36 ff ff ff 85 c0 0f 85 ce 01 00 00 6a 00"),
         bytes.fromhex("0f b6 85 36 ff ff ff 85 c0 90 90 90 90 90 90 6a 00"),
     ),
+    # File 0x? / VA 0x?: fix "uninitialized constant SoupvidMovie" when running with "-out"
+    # FIXME: this throws `COM-Error from source: desc: error:无效指针 context: wcode:.`
+    # probably an already dead/trimmed path, always won't work
+    (
+        bytes.fromhex("55 8B EC 83 EC 60 89 4D A8 68 50 64 70 00"),
+        bytes.fromhex("31 C0 C2 0C 00 60 89 4D A8 68 50 64 70 00"),
+    ),
+    # cont'd
+    (
+        bytes.fromhex("55 8B EC 83 EC 60 89 4D A8 68 30 64 70 00"),
+        bytes.fromhex("31 C0 C2 0C 00 68 30 64 70 00 90 90 90 90"),
+    ),
+    # File 0x1958E2 / VA 0x596AE2: jnz -> jmp, allowing unsigned .toy
+    (
+        bytes.fromhex("0f b6 55 f3 85 d2 75 4e 0f b6 45 10 85 c0 75 46"),
+        bytes.fromhex("0f b6 55 f3 85 d2 eb 4e 0f b6 45 10 85 c0 75 46"),
+    ),
 )
 
 
