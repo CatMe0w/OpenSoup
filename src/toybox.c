@@ -337,9 +337,9 @@ static bool activate_button(int slot, bool desired_on) {
     }
 }
 
-static int pack_for_order(float order) {
-    for (int i = 0; i < tb.npacks; i++) {
-        if (fabsf(tb.packs[i].def->order - order) < 0.01f) {
+static int pack_for_id(const char* pack_id) {
+    for (int i = 0; pack_id && i < tb.npacks; i++) {
+        if (strcmp(tb.packs[i].def->id, pack_id) == 0) {
             return i;
         }
     }
@@ -678,7 +678,7 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
     for (int i = 0; i < toydefs_icon_count() && tb.nicons < TB_MAX_ICONS; i++) {
         const toyicon_t* def = toydefs_icon_at(i);
         const toydef_t* toy = toydefs_find(def->class_name);
-        const int pack = pack_for_order(def->pack_order);
+        const int pack = pack_for_id(def->pack);
         if (!toy || pack < 0) {
             continue;
         }

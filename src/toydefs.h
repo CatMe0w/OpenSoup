@@ -1,10 +1,12 @@
 #pragma once
 #include <stdbool.h>
 
-// Toy definitions loaded from toydefs.json (internal, intermediate)
-// Interim pipeline: the original parses these natively (BinaryToyReader);
-// whether we port that reader to C or keep the external converter is
-// deliberately deferred.
+// Toy definitions loaded from the assets tree: one JSON per toy def at
+// <assets>/<container>/defs/<classname>.json (icon catalog entry embedded),
+// plus cross-container pack metadata at <assets>/packs.json (see
+// assets_layout.h). Interim pipeline: the original parses the binary defs
+// natively (BinaryToyReader); whether we port that reader to C or keep the
+// external converter is deliberately deferred.
 //
 // Units: geometry (rest positions, shape points, joint anchors) is in
 // TOY-LOCAL units; instantiation scales by base_scale into world meters
@@ -109,15 +111,15 @@ typedef struct {
     const char* image;
     int num_frames;
     int instance_limit;
-    float pack_order;
-    float order;
+    const char* pack;  // pack id into packs.json; NULL = not shown (HelpToy)
     int catalog_index; // frozen global Toybox order (defs files are unordered)
 } toyicon_t;
 
 typedef struct {
     const char* id;
     const char* license;
-    const char* header; // assets-root-relative TGA sequence prefix
+    const char* header; // TGA sequence prefix, resolved from packs.json's
+                        // {container, resource} at load (assets-root-relative)
     float order;
 } toypack_t;
 

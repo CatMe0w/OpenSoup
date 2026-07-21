@@ -32,13 +32,33 @@ static char* dupstr(const cJSON* obj, const char* key) {
     return cJSON_IsString(v) ? strdup(v->valuestring) : NULL;
 }
 
-static void parse_limb(td_limb* l, const cJSON* limb) {
-    l->name = dupstr(limb, "name");
+static bool boolean(const cJSON* obj, const char* key, bool fallback) {
+    const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsBool(v)) {
+        return cJSON_IsTrue(v);
+    }
+    return cJSON_IsNumber(v) ? v->valuedouble != 0.0 : fallback;
+}
+
+// Def-side image/sound locations are relative to the container's synthetic
+// defs/ dir; map them into the container's resource VFS at load time.
+static char* resolve_location(const char* container, const char* loc) {
+    char buf[1400];
+    if (strncmp(loc, "../", 3) == 0) {
+        snprintf(buf, sizeof buf, "%s/resources/%s", container, loc + 3);
+    } else {
+        snprintf(buf, sizeof buf, "%s/resources/defs/%s", container, loc);
+    }
+    return strdup(buf);
+}
+
+static void parse_limb(td_limb* l, const cJSON* limb, const char* container) {
+    l->name = dupstr(limb, "id");
     l->local_collision_group = dupstr(limb, "localCollisionGroup");
-    const cJSON* bs = cJSON_GetObjectItemCaseSensitive(limb, "bodyState");
-    l->rest_pos[0] = idx(bs, 0, 0.0f);
-    l->rest_pos[1] = idx(bs, 1, 0.0f);
-    l->rest_orient = idx(bs, 2, 0.0f);
+    const cJSON* pos = cJSON_GetObjectItemCaseSensitive(limb, "position");
+    l->rest_pos[0] = idx(pos, 0, 0.0f);
+    l->rest_pos[1] = idx(pos, 1, 0.0f);
+    l->rest_orient = num(limb, "orientation", 0.0f);
     l->mass = num(limb, "mass", 1.0f);
     l->inertia = num(limb, "inertiaTensor", 1.0f);
     const cJSON* g = cJSON_GetObjectItemCaseSensitive(limb, "gravityOverride");
@@ -48,10 +68,10 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
     l->mouse_dampener = num(limb, "mouseDampenerOverride", PHYS_MOUSE_DAMPENER);
     l->air_resistance_linear = num(limb, "airResistanceLinear", 0.0f);
     l->air_resistance_angular = num(limb, "airResistanceAngular", 0.0f);
-    l->fixed_move = num(limb, "fixedMove", 0) != 0.0f;
-    l->fixed_rotate = num(limb, "fixedRotate", 0) != 0.0f;
-    l->default_grab_move = num(limb, "defaultGrabMove", 1) != 0.0f;
-    l->default_grab_rotate = num(limb, "defaultGrabRotate", 1) != 0.0f;
+    l->fixed_move = boolean(limb, "fixedMove", false);
+    l->fixed_rotate = boolean(limb, "fixedRotate", false);
+    l->default_grab_move = boolean(limb, "defaultGrabMove", true);
+    l->default_grab_rotate = boolean(limb, "defaultGrabRotate", true);
     const cJSON* mat = cJSON_GetObjectItemCaseSensitive(limb, "material");
     static const char* mkeys[5] = { "velocityResponse", "stiffness",
                                     "dampener", "kineticFriction", "staticFriction" };
@@ -59,14 +79,15 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
         l->material[i] = num(mat, mkeys[i], 0.0f);
     }
 
-    const cJSON* shapes = cJSON_GetObjectItemCaseSensitive(limb, "shapes");
+    const cJSON* shapes = cJSON_GetObjectItemCaseSensitive(limb,
+                                                           "collisionShape");
     l->nshapes = cJSON_GetArraySize(shapes);
     l->shapes = calloc((size_t)l->nshapes ? (size_t)l->nshapes : 1, sizeof(td_shape));
     int si = 0;
     const cJSON* shape;
     cJSON_ArrayForEach(shape, shapes) {
         td_shape* s = &l->shapes[si++];
-        s->sid = dupstr(shape, "sid");
+        s->sid = dupstr(shape, "id");
         const cJSON* member = cJSON_GetObjectItemCaseSensitive(shape, "memberOf");
         s->nmembers = cJSON_GetArraySize(member);
         s->members = calloc((size_t)s->nmembers ? (size_t)s->nmembers : 1,
@@ -80,31 +101,36 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
             s->members[gi++] = strdup(g->valuestring);
         }
         s->nmembers = gi;
-        s->grab = num(shape, "grab", 0) != 0.0f;
-        s->grab_move = num(shape, "grabMove", 0) != 0.0f;
-        s->grab_rotate = num(shape, "grabRotate", 0) != 0.0f;
-        const cJSON* pts = cJSON_GetObjectItemCaseSensitive(shape, "points");
+        s->grab = boolean(shape, "grab", false);
+        s->grab_move = boolean(shape, "grabMove", false);
+        s->grab_rotate = boolean(shape, "grabRotate", false);
+        // geometry: shape.vertex[] of {position, radius}; circle = 1 vertex
+        const cJSON* geom = cJSON_GetObjectItemCaseSensitive(shape, "shape");
+        const cJSON* pts = cJSON_GetObjectItemCaseSensitive(geom, "vertex");
         s->npoints = cJSON_GetArraySize(pts);
         s->points = calloc((size_t)s->npoints ? (size_t)s->npoints : 1, sizeof(td_point));
         int pi = 0;
         const cJSON* pt;
         cJSON_ArrayForEach(pt, pts) {
-            s->points[pi].x = idx(pt, 0, 0.0f);
-            s->points[pi].y = idx(pt, 1, 0.0f);
-            s->points[pi].r = idx(pt, 2, 0.0f);
+            const cJSON* vp = cJSON_GetObjectItemCaseSensitive(pt, "position");
+            s->points[pi].x = idx(vp, 0, 0.0f);
+            s->points[pi].y = idx(vp, 1, 0.0f);
+            s->points[pi].r = num(pt, "radius", 0.0f);
             pi++;
         }
     }
 
-    const cJSON* sprites = cJSON_GetObjectItemCaseSensitive(limb, "sprites");
+    const cJSON* sprites = cJSON_GetObjectItemCaseSensitive(limb, "sprite");
     l->nsprites = cJSON_GetArraySize(sprites);
     l->sprites = calloc((size_t)l->nsprites ? (size_t)l->nsprites : 1, sizeof(td_sprite));
     int pi = 0;
     const cJSON* sp;
     cJSON_ArrayForEach(sp, sprites) {
         td_sprite* d = &l->sprites[pi++];
-        d->sid = dupstr(sp, "sid");
-        d->image = dupstr(sp, "image");
+        d->sid = dupstr(sp, "id");
+        char* loc = dupstr(sp, "imageLocation");
+        d->image = loc ? resolve_location(container, loc) : NULL;
+        free(loc);
         d->num_frames = (int)num(sp, "numFrames", 1);
         const cJSON* com = cJSON_GetObjectItemCaseSensitive(sp, "objectCentreOfMass");
         d->com[0] = idx(com, 0, 0.0f);
@@ -114,14 +140,14 @@ static void parse_limb(td_limb* l, const cJSON* limb) {
 
     // motors fold to constant per-limb force/torque; the on/off scripting
     // (Ruby motor.force=) comes with the runtime milestone
-    const cJSON* lm = cJSON_GetObjectItemCaseSensitive(limb, "linearMotors");
+    const cJSON* lm = cJSON_GetObjectItemCaseSensitive(limb, "linearMotor");
     const cJSON* m;
     cJSON_ArrayForEach(m, lm) {
         const cJSON* f = cJSON_GetObjectItemCaseSensitive(m, "force");
         l->motor_force[0] += idx(f, 0, 0.0f);
         l->motor_force[1] += idx(f, 1, 0.0f);
     }
-    const cJSON* rm = cJSON_GetObjectItemCaseSensitive(limb, "rotationalMotors");
+    const cJSON* rm = cJSON_GetObjectItemCaseSensitive(limb, "rotationalMotor");
     cJSON_ArrayForEach(m, rm) {
         l->motor_torque += num(m, "torque", 0.0f);
     }
@@ -172,7 +198,19 @@ static bool load_packs(const char* assets_root) {
         toypack_t* p = &packs[npacks++];
         p->id = dupstr(pack, "id");
         p->license = dupstr(pack, "license");
-        p->header = dupstr(pack, "header");
+        // header art = a resource key inside a container's VFS
+        const cJSON* hdr = cJSON_GetObjectItemCaseSensitive(pack, "header");
+        char* container = dupstr(hdr, "container");
+        char* resource = dupstr(hdr, "resource");
+        if (container && resource) {
+            char buf[1024];
+            snprintf(buf, sizeof buf, "%s/resources/%s", container, resource);
+            p->header = strdup(buf);
+        } else {
+            p->header = NULL;
+        }
+        free(container);
+        free(resource);
         p->order = num(pack, "order", (float)npacks);
     }
     cJSON_Delete(root);
@@ -187,9 +225,9 @@ static void load_toy_file(const char* path, const char* container) {
         fprintf(stderr, "toydefs: unreadable defs file %s\n", path);
         return;
     }
-    char* class_name = dupstr(toy, "className");
+    char* class_name = dupstr(toy, "id");
     if (!class_name) {
-        fprintf(stderr, "toydefs: no className in %s\n", path);
+        fprintf(stderr, "toydefs: no toy id in %s\n", path);
         cJSON_Delete(toy);
         return;
     }
@@ -197,17 +235,22 @@ static void load_toy_file(const char* path, const char* container) {
     const cJSON* icon = cJSON_GetObjectItemCaseSensitive(toy, "icon");
     if (cJSON_IsObject(icon) && nicons < MAX_ICONS) {
         toyicon_t* i = &icons[nicons++];
-        i->name = dupstr(icon, "name");
+        i->name = dupstr(icon, "displayName");
         i->class_name = strdup(class_name);
-        i->image = dupstr(icon, "image");
+        // the icon may come from a different container than the def
+        // (christmas07 re-icons the toys_toybox C06 classes)
+        char* src = dupstr(icon, "container");
+        char* loc = dupstr(icon, "imageLocation");
+        i->image = loc ? resolve_location(src ? src : container, loc) : NULL;
+        free(src);
+        free(loc);
         i->num_frames = (int)num(icon, "numFrames", 1.0f);
-        i->instance_limit = (int)num(icon, "instanceLimit", 100.0f);
-        i->pack_order = num(icon, "packOrder", 0.0f);
-        i->order = num(icon, "order", 0.0f);
+        i->instance_limit = (int)num(icon, "globalToyInstanceLimit", 100.0f);
+        i->pack = dupstr(icon, "pack");
         i->catalog_index = (int)num(icon, "catalogIndex", (float)nicons);
     }
 
-    const cJSON* limbs = cJSON_GetObjectItemCaseSensitive(toy, "limbs");
+    const cJSON* limbs = cJSON_GetObjectItemCaseSensitive(toy, "limb");
     const int nlimbs = cJSON_GetArraySize(limbs);
     if (nlimbs < 1 || ndefs >= MAX_DEFS) {
         free(class_name);
@@ -224,24 +267,27 @@ static void load_toy_file(const char* path, const char* container) {
         int li = 0;
         const cJSON* limb;
         cJSON_ArrayForEach(limb, limbs) {
-            parse_limb(&d->limbs[li++], limb);
+            parse_limb(&d->limbs[li++], limb, container);
         }
 
-        const cJSON* joints = cJSON_GetObjectItemCaseSensitive(toy, "joints");
+        const cJSON* joints = cJSON_GetObjectItemCaseSensitive(toy, "joint");
         d->njoints = cJSON_GetArraySize(joints);
         d->joints = calloc((size_t)d->njoints ? (size_t)d->njoints : 1, sizeof(td_joint));
         int ji = 0;
         const cJSON* joint;
         cJSON_ArrayForEach(joint, joints) {
             td_joint* j = &d->joints[ji++];
-            char* n1 = dupstr(joint, "limb1");
-            char* n2 = dupstr(joint, "limb2");
+            // limb1/limb2 are nested attachments: {limbID, attachPoint}
+            const cJSON* l1 = cJSON_GetObjectItemCaseSensitive(joint, "limb1");
+            const cJSON* l2 = cJSON_GetObjectItemCaseSensitive(joint, "limb2");
+            char* n1 = dupstr(l1, "limbID");
+            char* n2 = dupstr(l2, "limbID");
             j->limb1 = limb_index(d, n1);
             j->limb2 = limb_index(d, n2);
             free(n1);
             free(n2);
-            const cJSON* a1 = cJSON_GetObjectItemCaseSensitive(joint, "anchor1");
-            const cJSON* a2 = cJSON_GetObjectItemCaseSensitive(joint, "anchor2");
+            const cJSON* a1 = cJSON_GetObjectItemCaseSensitive(l1, "attachPoint");
+            const cJSON* a2 = cJSON_GetObjectItemCaseSensitive(l2, "attachPoint");
             j->anchor1[0] = idx(a1, 0, 0.0f);
             j->anchor1[1] = idx(a1, 1, 0.0f);
             j->anchor2[0] = idx(a2, 0, 0.0f);
@@ -251,7 +297,7 @@ static void load_toy_file(const char* path, const char* container) {
             j->dampener = num(joint, "dampener", 0.0f);
         }
 
-        const cJSON* rjs = cJSON_GetObjectItemCaseSensitive(toy, "rotationalJoints");
+        const cJSON* rjs = cJSON_GetObjectItemCaseSensitive(toy, "rotationalJoint");
         d->nrotjoints = cJSON_GetArraySize(rjs);
         d->rotjoints = calloc((size_t)d->nrotjoints ? (size_t)d->nrotjoints : 1,
                               sizeof(td_rotjoint));
@@ -259,28 +305,27 @@ static void load_toy_file(const char* path, const char* container) {
         const cJSON* rj;
         cJSON_ArrayForEach(rj, rjs) {
             td_rotjoint* r = &d->rotjoints[ri++];
-            char* n1 = dupstr(rj, "limb1");
-            char* n2 = dupstr(rj, "limb2");
+            char* n1 = dupstr(rj, "limbID1");
+            char* n2 = dupstr(rj, "limbID2");
             r->limb1 = limb_index(d, n1);
             r->limb2 = limb_index(d, n2);
             free(n1);
             free(n2);
             r->orientation1 = num(rj, "orientation1", 0.0f);
             r->orientation2 = num(rj, "orientation2", 0.0f);
-            const cJSON* fields = cJSON_GetObjectItemCaseSensitive(rj, "fields");
-            r->rest = idx(fields, 0, 0.0f);
-            r->stiffness = idx(fields, 1, 0.0f);
-            r->dampener = idx(fields, 2, 0.0f);
+            r->rest = num(rj, "restLength", 0.0f);
+            r->stiffness = num(rj, "stiffness", 0.0f);
+            r->dampener = num(rj, "dampener", 0.0f);
         }
 
-        const cJSON* sounds = cJSON_GetObjectItemCaseSensitive(toy, "sounds");
+        const cJSON* sounds = cJSON_GetObjectItemCaseSensitive(toy, "sound");
         d->nsounds = cJSON_GetArraySize(sounds);
         d->sounds = calloc((size_t)d->nsounds ? (size_t)d->nsounds : 1,
                            sizeof(td_sound));
         int si = 0;
         const cJSON* sound;
         cJSON_ArrayForEach(sound, sounds) {
-            d->sounds[si].sid = dupstr(sound, "sid");
+            d->sounds[si].sid = dupstr(sound, "id");
             d->sounds[si].location = dupstr(sound, "location");
             si++;
         }

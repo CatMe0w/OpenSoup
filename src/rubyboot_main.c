@@ -181,11 +181,11 @@ int main(int argc, char** argv) {
         if (!icon) {
             continue;
         }
-        if (icon->pack_order > 0.99f && icon->pack_order < 1.01f) {
+        if (icon->pack && strcmp(icon->pack, "Sports") == 0) {
             sports_icons++;
         }
-        if (strcmp(icon->class_name, "REssBee") == 0 &&
-            icon->pack_order > 6.99f && icon->pack_order < 7.01f) {
+        if (strcmp(icon->class_name, "REssBee") == 0 && icon->pack &&
+            strcmp(icon->pack, "Astrobots") == 0) {
             essbee_in_astrobots = true;
         }
     }
@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
     int decoded_icon_frames = 0;
     for (int i = 0; i < toydefs_icon_count(); i++) {
         const toyicon_t* icon = toydefs_icon_at(i);
-        if (!icon || icon->pack_order < 1.0f || icon->pack_order > 8.0f) {
+        if (!icon || !icon->pack) {
             continue;
         }
         const int frames = icon->num_frames < 6 ? icon->num_frames : 6;
