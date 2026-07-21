@@ -1,6 +1,7 @@
 #include "toybox.h"
 
 #include "assets.h"
+#include "assets_layout.h"
 #include "audio.h"
 #include "rubyhost.h"
 #include "scene.h"
@@ -594,8 +595,8 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
         asset_reset(&tb.shell[i]);
     }
 
-    const char* tex = "toybox_toy/graphics/toybox/textures/";
-    const char* btn = "toybox_toy/graphics/toybox/buttons/";
+    const char* tex = "toybox_toy/resources/graphics/toybox/textures/";
+    const char* btn = "toybox_toy/resources/graphics/toybox/buttons/";
     char rel[512], alpha[512];
     snprintf(rel, sizeof rel, "%stiling_wood.flc", tex);
     snprintf(alpha, sizeof alpha, "%stiling_wood_Alpha.flc", tex);
@@ -651,7 +652,8 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
     LOAD_BUTTON_STATES(SH_WEB, "web_button");
 #undef LOAD_BUTTON_STATES
     asset_load_sequence(&tb.shell[SH_MUTE],
-                        "toybox_toy/graphics/toybox/bigger mute/mute_in_button",
+                        "toybox_toy/resources/graphics/toybox/bigger mute/"
+                        "mute_in_button",
                         6, tb.x, tb.y);
     for (size_t i = 0;
          i < sizeof animated_buttons / sizeof animated_buttons[0];
@@ -826,8 +828,8 @@ void toybox_mouse_up(float x, float y) {
         double wx, wy;
         if (rbh_view_to_scene(x, y, &wx, &wy)) {
             char class_dir[2048];
-            snprintf(class_dir, sizeof class_dir, "%s/%s", tb.assets_root,
-                     icon->toy->root);
+            container_resource_root(class_dir, sizeof class_dir,
+                                    tb.assets_root, icon->toy->root);
             if (rbh_spawn_toy(icon->def->class_name, class_dir, wx, wy)) {
                 printf("toybox: dropped %s at %.2f, %.2f\n",
                        icon->def->class_name, wx, wy);

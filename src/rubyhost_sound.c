@@ -3,6 +3,7 @@
 #include "audio.h"
 #include <stdio.h>
 #include <string.h>
+#include "assets_layout.h"
 #include "rubyhost_internal.h"
 
 static VALUE sound_toy(VALUE self) {
@@ -24,23 +25,17 @@ static bool sound_resolve_path(VALUE self, char* out, size_t cap) {
     if (NIL_P(toyv) || !sn_get(toyv)->def || !sn_get(toyv)->def->root) {
         return false;
     }
-    char assets[sizeof g_root];
-    snprintf(assets, sizeof assets, "%s", g_root);
-    char* slash = strrchr(assets, '/');
-    if (slash) {
-        *slash = 0;
-    } else {
-        snprintf(assets, sizeof assets, ".");
-    }
+    char res[1024];
+    container_resource_root(res, sizeof res, g_assets,
+                            sn_get(toyv)->def->root);
 
-    // Def locations were relative to <pack>/defs/. The extracted layout
-    // omits that synthetic defs directory, so ../sound/... maps directly to
-    // <assets>/<pack>/sound/....
+    // Def locations were relative to the container's synthetic defs/ dir,
+    // which sat parallel to the VFS root: ../sound/... maps directly to
+    // <container>/resources/sound/....
     while (strncmp(path, "../", 3) == 0) {
         path += 3;
     }
-    return (size_t)snprintf(out, cap, "%s/%s/%s", assets,
-                            sn_get(toyv)->def->root, path) < cap;
+    return (size_t)snprintf(out, cap, "%s/%s", res, path) < cap;
 }
 
 static VALUE sound_path(VALUE self) {

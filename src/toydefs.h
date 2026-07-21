@@ -111,6 +111,7 @@ typedef struct {
     int instance_limit;
     float pack_order;
     float order;
+    int catalog_index; // frozen global Toybox order (defs files are unordered)
 } toyicon_t;
 
 typedef struct {
@@ -120,7 +121,7 @@ typedef struct {
     float order;
 } toypack_t;
 
-bool toydefs_load(const char* json_path);
+bool toydefs_load(const char* assets_root);
 const toydef_t* toydefs_find(const char* class_name);
 int toydefs_count(void);
 const toydef_t* toydefs_at(int index);

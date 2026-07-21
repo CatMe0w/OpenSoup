@@ -2,6 +2,7 @@
 // no window. Exits 0 iff the whole boot + wall-position round trip works.
 #include "rubyhost.h"
 #include "assets.h"
+#include "assets_layout.h"
 #include "audio.h"
 #include "physics.h"
 #include "toydefs.h"
@@ -137,7 +138,8 @@ int main(int argc, char** argv) {
 
     // Static Ogg decode + the original mixer's fixed 32-voice capacity.
     snprintf(path, sizeof path,
-             "%s/toys_toybox_toy/sound/c06 goose/goosehonk.ogg", assets);
+             "%s/toys_toybox_toy/resources/sound/c06 goose/goosehonk.ogg",
+             assets);
     const int sample = audio_sample_load(path);
     int channels = 0, sample_rate = 0;
     uint64_t frames = 0;
@@ -159,9 +161,8 @@ int main(int argc, char** argv) {
             channels, sample_rate, (unsigned long long)frames,
             AUDIO_MAX_VOICES);
 
-    snprintf(path, sizeof path, "%s/toydefs.json", assets);
-    if (!toydefs_load(path)) {
-        fprintf(stderr, "rubyboot: cannot load %s\n", path);
+    if (!toydefs_load(assets)) {
+        fprintf(stderr, "rubyboot: cannot load toy defs under %s\n", assets);
         audio_shutdown();
         return 1;
     }
@@ -220,8 +221,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "rubyboot: decoded %d visible Toybox icons (%d frames)\n",
             decoded_icons, decoded_icon_frames);
 
-    snprintf(path, sizeof path, "%s/souptoys_core_toy", assets);
-    bool ok = rbh_boot(path);
+    bool ok = rbh_boot(assets);
 
     // Milestone: World toy exists per engine and the walls follow the screen
     // through the whole framework chain: screen_size_changed ->
@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
     // must push the bodies apart.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_toybox_toy");
         ok = rbh_load_toy_class("U1Bouncy", dir)
           && rbh_spawn_toy("U1Bouncy", dir, 4.0, 4.0)
           && rbh_spawn_toy("U1Bouncy", dir, 4.15, 4.0);
@@ -312,7 +312,7 @@ int main(int argc, char** argv) {
     // (group 1), making an inverted filter immediately visible.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_data_toy");
         ok = rbh_load_toy_class("WSkate", dir)
           && rbh_spawn_toy("WSkate", dir, 6.0, 5.0);
     }
@@ -340,7 +340,7 @@ int main(int argc, char** argv) {
     // replace itself with four SnowballSmall instances on first overlap.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/christmas07_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "christmas07_toy");
         ok = rbh_load_toy_class("SnowballSmall", dir)
           && rbh_load_toy_class("SnowballLarge", dir);
         if (ok) ok = rbh_spawn_toy("SnowballLarge", dir, 3.0, 0.03);
@@ -364,7 +364,7 @@ int main(int argc, char** argv) {
     // under gravity without the joints blowing up.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_toybox_toy");
         ok = rbh_spawn_toy("U6Bluebear", dir, 6.0, 5.0);
     }
     if (ok) {
@@ -413,7 +413,7 @@ int main(int argc, char** argv) {
     // ramp; an end handle rotates it while keeping its position anchored.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_data_toy");
         ok = rbh_spawn_toy("SCTurnableRamp", dir, 7.0, 4.0);
     }
     if (ok) {
@@ -450,7 +450,7 @@ int main(int argc, char** argv) {
     // against ordinary physics.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/christmas07_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "christmas07_toy");
         ok = rbh_spawn_toy("SnowballCannon", dir, 8.0, 3.0);
     }
     if (ok) {
@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
     // shrink the egg's lifetime and it must remove itself (full teardown).
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_toybox_toy");
         ok = rbh_load_toy_class("GooseEgg", dir)
           && rbh_spawn_toy("Goose", dir, 9.0, 3.0);
     }
@@ -605,7 +605,7 @@ int main(int argc, char** argv) {
     // SCHoop's sensor-only trigger_top rectangle increments the score on exit.
     if (ok) {
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_data_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_data_toy");
         ok = rbh_load_toy_class("Basketball", dir)
           && rbh_load_toy_class("SCHoop", dir)
           && rbh_spawn_toy("SCHoop", dir, 6.0, 2.0);
@@ -681,7 +681,7 @@ int main(int argc, char** argv) {
         fake_sprite_created = fake_sprite_removed = 0;
         rbh_set_sprite_hook(fake_sprite_add, fake_sprite_remove, NULL);
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_toybox_toy");
 
         // Pick the last sprite of a six-limb bear, not its first/root visual:
         // every visual must still resolve to and tear down the complete toy.
@@ -738,7 +738,7 @@ int main(int argc, char** argv) {
         fake_sprite_created = fake_sprite_removed = 0;
         rbh_set_sprite_hook(fake_sprite_add, fake_sprite_remove, NULL);
         char dir[1200];
-        snprintf(dir, sizeof dir, "%s/toys_toybox_toy", assets);
+        container_resource_root(dir, sizeof dir, assets, "toys_toybox_toy");
         if (rbh_spawn_toy("U6Bluebear", dir, 6.0, 5.0)) {
             fprintf(stderr, "rubyboot: partial visual realization succeeded\n");
             ok = false;

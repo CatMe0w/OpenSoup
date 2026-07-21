@@ -7,11 +7,12 @@
 // $ui_engine/$grid_engine/$engine globals -> eval souptoys.rb bootstrap ->
 // load world.rb -> $core.core_loaded (which builds the World toy per engine).
 //
-// scripts_root is the resource root for Souptoys#resource_load, currently the
-// extracted souptoys_core.toy directory. Requires toydefs_load() to have run
-// (Toy allocation pulls limb data from the defs by class name).
+// assets_root is the extracted assets tree (see assets_layout.h); framework
+// scripts for Souptoys#resource_load come from its souptoys_core_toy
+// container's resource VFS. Requires toydefs_load() to have run (Toy
+// allocation pulls limb data from the defs by class name).
 
-bool rbh_boot(const char* scripts_root);
+bool rbh_boot(const char* assets_root);
 
 // Evaluate Ruby source; on exception prints class/message/backtrace tagged
 // with `what` and returns false.

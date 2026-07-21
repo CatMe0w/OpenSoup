@@ -8,6 +8,7 @@
 // engine, limb/shape, sound); this file owns the class registry, the stub API
 // surface, the Souptoys resource host, and boot.
 #include "rubyhost.h"
+#include "assets_layout.h"
 #include "physics.h"
 #include <signal.h>
 #include <stdio.h>
@@ -22,7 +23,8 @@ void Init_ext(void); // ext/extinit.o: static stringio + syck
 #define MAX_CLASSES 40
 static struct { const char* cname; VALUE cls; } g_reg[MAX_CLASSES];
 static int g_nreg;
-char g_root[1024]; // resource root (extracted souptoys_core.toy)
+char g_assets[1024]; // the assets tree root (per-container defs + resources)
+char g_root[1024];   // souptoys_core_toy resource root (framework scripts)
 
 VALUE cls_find(const char* name) {
     for (int i = 0; i < g_nreg; i++) {
@@ -303,8 +305,10 @@ static const char* BOOTSTRAP =
     "   end;"
     "end;";
 
-bool rbh_boot(const char* scripts_root) {
-    snprintf(g_root, sizeof g_root, "%s", scripts_root);
+bool rbh_boot(const char* assets_root) {
+    snprintf(g_assets, sizeof g_assets, "%s", assets_root);
+    container_resource_root(g_root, sizeof g_root, assets_root,
+                            "souptoys_core_toy");
 
     ruby_init();
     ruby_script("souptoys_embedded");

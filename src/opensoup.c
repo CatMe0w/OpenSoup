@@ -2,6 +2,7 @@
 // per-frame heartbeat, and owns the input policy the original Toybox kept in
 // its Win32 window procedures.
 #include "opensoup.h"
+#include "assets_layout.h"
 #include "audio.h"
 #include "rubyhost.h"
 #include "scene.h"
@@ -18,13 +19,10 @@ bool opensoup_boot(const char* assets_root) {
     if (!audio_init(false)) {
         fprintf(stderr, "opensoup: audio unavailable, continuing silent\n");
     }
-    char p[1024];
-    snprintf(p, sizeof p, "%s/toydefs.json", assets_root);
-    if (!toydefs_load(p)) {
-        fprintf(stderr, "toydefs.json missing at %s\n", p);
+    if (!toydefs_load(assets_root)) {
+        fprintf(stderr, "no toy defs under %s\n", assets_root);
     }
-    snprintf(p, sizeof p, "%s/souptoys_core_toy", assets_root);
-    if (!rbh_boot(p)) {
+    if (!rbh_boot(assets_root)) {
         return false;
     }
     printf("opensoup: Ruby framework booted\n");
@@ -40,7 +38,7 @@ bool opensoup_boot(const char* assets_root) {
             continue;
         }
         char dir[2048];
-        snprintf(dir, sizeof dir, "%s/%s", assets_root, d->root);
+        container_resource_root(dir, sizeof dir, assets_root, d->root);
         if (rbh_load_toy_class(d->class_name, dir)) {
             preloaded++;
         }

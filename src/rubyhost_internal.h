@@ -57,7 +57,8 @@ typedef struct {
 
 // rubyhost.c: class registry, resource root, protected calls into Ruby
 VALUE cls_find(const char* name);
-extern char g_root[1024]; // resource root (extracted souptoys_core.toy)
+extern char g_assets[1024]; // the assets tree root
+extern char g_root[1024];   // souptoys_core_toy resource root
 bool fcall_protected(VALUE recv, const char* name, int argc,
                      VALUE a0, VALUE a1, VALUE a2, const char* what);
 

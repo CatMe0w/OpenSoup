@@ -16,7 +16,7 @@ static NSURL* assets_root_url(void) {
 
     return [[support URLByAppendingPathComponent:@"cat.me0w.opensoup"
                                      isDirectory:YES]
-        URLByAppendingPathComponent:@"Assets" isDirectory:YES];
+        URLByAppendingPathComponent:@"assets" isDirectory:YES];
 }
 
 const char* app_assets_root(void) {
@@ -52,15 +52,16 @@ app_assets_state app_assets_get_state(void) {
             return APP_ASSETS_DIRECTORY_MISSING;
         }
 
-        NSURL* toydefs = [root URLByAppendingPathComponent:@"toydefs.json"
-                                           isDirectory:NO];
-        if (![files fileExistsAtPath:toydefs.path isDirectory:&is_directory]
+        NSURL* packs = [root URLByAppendingPathComponent:@"packs.json"
+                                             isDirectory:NO];
+        if (![files fileExistsAtPath:packs.path isDirectory:&is_directory]
             || is_directory) {
-            return APP_ASSETS_TOYDEFS_MISSING;
+            return APP_ASSETS_PACKS_MISSING;
         }
 
-        NSURL* core = [root URLByAppendingPathComponent:@"souptoys_core_toy"
-                                            isDirectory:YES];
+        NSURL* core = [[root
+            URLByAppendingPathComponent:@"souptoys_core_toy" isDirectory:YES]
+            URLByAppendingPathComponent:@"resources" isDirectory:YES];
         if (![files fileExistsAtPath:core.path isDirectory:&is_directory]
             || !is_directory) {
             return APP_ASSETS_CORE_MISSING;

@@ -1,6 +1,7 @@
 #include "toydefs.h"
 #include "physics.h"
 #include "cJSON.h"
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -135,13 +136,10 @@ static int limb_index(const toydef_t* d, const char* name) {
     return -1;
 }
 
-bool toydefs_load(const char* json_path) {
-    if (ndefs > 0) {
-        return true; // already loaded by the application bootstrap
-    }
-    FILE* f = fopen(json_path, "rb");
+static cJSON* parse_json_file(const char* path) {
+    FILE* f = fopen(path, "rb");
     if (!f) {
-        return false;
+        return NULL;
     }
     fseek(f, 0, SEEK_END);
     const long len = ftell(f);
@@ -150,18 +148,22 @@ bool toydefs_load(const char* json_path) {
     if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
         free(buf);
         fclose(f);
-        return false;
+        return NULL;
     }
     fclose(f);
     buf[len] = 0;
-
     cJSON* root = cJSON_Parse(buf);
     free(buf);
+    return root;
+}
+
+static bool load_packs(const char* assets_root) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/packs.json", assets_root);
+    cJSON* root = parse_json_file(path);
     if (!root) {
         return false;
     }
-    const cJSON* toys = cJSON_GetObjectItemCaseSensitive(root, "toys");
-
     const cJSON* pack;
     cJSON_ArrayForEach(pack, cJSON_GetObjectItemCaseSensitive(root, "packs")) {
         if (npacks >= MAX_PACKS) {
@@ -173,35 +175,49 @@ bool toydefs_load(const char* json_path) {
         p->header = dupstr(pack, "header");
         p->order = num(pack, "order", (float)npacks);
     }
+    cJSON_Delete(root);
+    return true;
+}
 
-    const cJSON* icon;
-    cJSON_ArrayForEach(icon, cJSON_GetObjectItemCaseSensitive(root, "icons")) {
-        if (nicons >= MAX_ICONS) {
-            break;
-        }
+// One <container>/defs/<classname>.json: a toy def with its (optional)
+// Toybox icon catalog entry embedded.
+static void load_toy_file(const char* path, const char* container) {
+    cJSON* toy = parse_json_file(path);
+    if (!toy) {
+        fprintf(stderr, "toydefs: unreadable defs file %s\n", path);
+        return;
+    }
+    char* class_name = dupstr(toy, "className");
+    if (!class_name) {
+        fprintf(stderr, "toydefs: no className in %s\n", path);
+        cJSON_Delete(toy);
+        return;
+    }
+
+    const cJSON* icon = cJSON_GetObjectItemCaseSensitive(toy, "icon");
+    if (cJSON_IsObject(icon) && nicons < MAX_ICONS) {
         toyicon_t* i = &icons[nicons++];
         i->name = dupstr(icon, "name");
-        i->class_name = dupstr(icon, "className");
+        i->class_name = strdup(class_name);
         i->image = dupstr(icon, "image");
         i->num_frames = (int)num(icon, "numFrames", 1.0f);
         i->instance_limit = (int)num(icon, "instanceLimit", 100.0f);
         i->pack_order = num(icon, "packOrder", 0.0f);
         i->order = num(icon, "order", 0.0f);
+        i->catalog_index = (int)num(icon, "catalogIndex", (float)nicons);
     }
 
-    const cJSON* toy;
-    cJSON_ArrayForEach(toy, toys) {
-        if (ndefs >= MAX_DEFS) {
-            break;
-        }
-        const cJSON* limbs = cJSON_GetObjectItemCaseSensitive(toy, "limbs");
-        const int nlimbs = cJSON_GetArraySize(limbs);
-        if (nlimbs < 1) {
-            continue;
-        }
+    const cJSON* limbs = cJSON_GetObjectItemCaseSensitive(toy, "limbs");
+    const int nlimbs = cJSON_GetArraySize(limbs);
+    if (nlimbs < 1 || ndefs >= MAX_DEFS) {
+        free(class_name);
+        cJSON_Delete(toy);
+        return;
+    }
+    {
         toydef_t* d = &defs[ndefs++];
-        d->class_name = strdup(toy->string);
-        d->root = dupstr(toy, "root");
+        d->class_name = class_name;
+        d->root = strdup(container);
         d->base_scale = num(toy, "baseScale", 1.0f);
         d->nlimbs = nlimbs;
         d->limbs = calloc((size_t)nlimbs, sizeof(td_limb));
@@ -269,7 +285,53 @@ bool toydefs_load(const char* json_path) {
             si++;
         }
     }
-    cJSON_Delete(root);
+    cJSON_Delete(toy);
+}
+
+static bool has_suffix(const char* name, const char* suffix) {
+    const size_t n = strlen(name);
+    const size_t s = strlen(suffix);
+    return n >= s && strcmp(name + n - s, suffix) == 0;
+}
+
+static int cmp_icon_catalog(const void* a, const void* b) {
+    return ((const toyicon_t*)a)->catalog_index
+         - ((const toyicon_t*)b)->catalog_index;
+}
+
+static void load_container(const char* assets_root, const char* container) {
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s/%s/defs", assets_root, container);
+    struct dirent** entries = NULL;
+    const int n = scandir(dir, &entries, NULL, alphasort);
+    for (int i = 0; i < n; i++) {
+        if (has_suffix(entries[i]->d_name, ".json")) {
+            char path[1400];
+            snprintf(path, sizeof path, "%s/%s", dir, entries[i]->d_name);
+            load_toy_file(path, container);
+        }
+        free(entries[i]);
+    }
+    free(entries);
+}
+
+bool toydefs_load(const char* assets_root) {
+    if (ndefs > 0) {
+        return true; // already loaded by the application bootstrap
+    }
+    if (!load_packs(assets_root)) {
+        return false;
+    }
+    struct dirent** entries = NULL;
+    const int n = scandir(assets_root, &entries, NULL, alphasort);
+    for (int i = 0; i < n; i++) {
+        if (entries[i]->d_name[0] != '.') {
+            load_container(assets_root, entries[i]->d_name);
+        }
+        free(entries[i]);
+    }
+    free(entries);
+    qsort(icons, (size_t)nicons, sizeof icons[0], cmp_icon_catalog);
     return ndefs > 0;
 }
 
