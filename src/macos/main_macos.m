@@ -78,13 +78,6 @@ static void show_missing_asset_alert(app_assets_state state) {
             @"OpenSoup could not find the required asset at:\n\n%@", missing]);
 }
 
-static void show_assets_directory_creation_alert(void) {
-    NSString* path = [NSString stringWithUTF8String:assets_root];
-    show_quit_alert(@"Assets folder could not be created",
-        [NSString stringWithFormat:
-            @"OpenSoup could not create its assets folder at:\n\n%@", path]);
-}
-
 static void show_installer_picker(void) {
     prepare_modal_ui();
     NSOpenPanel* panel = [NSOpenPanel openPanel];
@@ -330,12 +323,9 @@ int main(void) {
     const app_assets_state state = app_assets_get_state();
     if (state == APP_ASSETS_DIRECTORY_MISSING) {
         @autoreleasepool {
-            // XXX: create directory after picker returns a valid installer
-            if (app_assets_create_directory()) {
-                show_installer_picker();
-            } else {
-                show_assets_directory_creation_alert();
-            }
+            // XXX: unpack the selected payload, then call
+            // app_assets_install_toyfiles with its discrete .toy files
+            show_installer_picker();
         }
         return 1; // TODO
     }

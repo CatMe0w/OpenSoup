@@ -2,6 +2,7 @@
 #define OPENSOUP_APP_PATHS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 // Returns the fixed per-user assets root, or NULL if macOS cannot resolve
 // the user's Application Support directory. The returned pointer remains
@@ -17,7 +18,8 @@ typedef enum {
 // Checks the fixed assets root and the minimum files needed to boot.
 app_assets_state app_assets_get_state(void);
 
-// Creates the fixed assets root, including its parent directories.
-bool app_assets_create_directory(void);
+// Installs into a missing assets root and removes it again on failure.
+bool app_assets_install_toyfiles(const char* const* paths, size_t count,
+                                 char* error, size_t error_size);
 
 #endif

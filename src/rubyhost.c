@@ -447,6 +447,10 @@ static int cmp_toypack(const void* a, const void* b) {
 }
 
 bool rbh_catalog_finalize(void) {
+    // Fidelity boundary: this snapshots add_toypack and the final property
+    // overrides only. A future IconGrid pass should also feed manifest icons
+    // through IconToy#add_icon so its seasonal path/open-limit rewrites and
+    // LicensePolicy decisions become observable by the native Toybox.
     static const char* snapshot =
         "$opensoup_license_properties = $engine.get_license_properties;"
         "$opensoup_toypacks = IconToy.toypacks.map { |id, p|"

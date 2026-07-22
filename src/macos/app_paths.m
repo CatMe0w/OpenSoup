@@ -1,9 +1,13 @@
 #import <Foundation/Foundation.h>
 
 #include "app_paths.h"
+#include "toyfile_fs.h"
 
+#include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static NSURL* assets_root_url(void) {
     NSArray<NSURL*>* urls = [[NSFileManager defaultManager]
@@ -47,9 +51,11 @@ app_assets_state app_assets_get_state(void) {
 
         NSFileManager* files = [NSFileManager defaultManager];
         BOOL is_directory = NO;
-        if (![files fileExistsAtPath:root.path isDirectory:&is_directory]
-            || !is_directory) {
+        if (![files fileExistsAtPath:root.path isDirectory:&is_directory]) {
             return APP_ASSETS_DIRECTORY_MISSING;
+        }
+        if (!is_directory) {
+            return APP_ASSETS_CORE_MISSING;
         }
 
         NSURL* core = [[root
@@ -64,17 +70,52 @@ app_assets_state app_assets_get_state(void) {
     return APP_ASSETS_READY;
 }
 
-bool app_assets_create_directory(void) {
-    @autoreleasepool {
-        NSURL* root = assets_root_url();
-        if (!root) {
-            return false;
+bool app_assets_install_toyfiles(const char* const* paths, size_t count,
+                                 char* error, size_t error_size) {
+    const char* root = app_assets_root();
+    if (!root) {
+        if (error && error_size) {
+            snprintf(error, error_size, "cannot resolve the assets root");
         }
-
-        return [[NSFileManager defaultManager]
-            createDirectoryAtURL:root
-     withIntermediateDirectories:YES
-                      attributes:nil
-                           error:nil];
+        return false;
     }
+
+    struct stat info;
+    if (lstat(root, &info) == 0) {
+        if (error && error_size) {
+            snprintf(error, error_size, "assets root already exists: %s", root);
+        }
+        return false;
+    }
+    if (errno != ENOENT) {
+        if (error && error_size) {
+            snprintf(error, error_size, "cannot inspect assets root %s: %s",
+                     root, strerror(errno));
+        }
+        return false;
+    }
+
+    const toyfile_status status = toyfile_install_assets(
+        paths, count, root, error, error_size);
+    if (status == TOYFILE_OK) {
+        return true;
+    }
+
+    if (lstat(root, &info) == 0) {
+        @autoreleasepool {
+            NSError* rollback_error = nil;
+            NSURL* url = [NSURL fileURLWithFileSystemRepresentation:root
+                                                        isDirectory:YES
+                                                      relativeToURL:nil];
+            if (![[NSFileManager defaultManager] removeItemAtURL:url
+                                                           error:&rollback_error]
+                && error && error_size) {
+                const char* reason = rollback_error.localizedDescription.UTF8String;
+                strlcat(error, error[0] ? "; rollback failed: "
+                                        : "rollback failed: ", error_size);
+                strlcat(error, reason ? reason : "unknown error", error_size);
+            }
+        }
+    }
+    return false;
 }

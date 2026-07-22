@@ -708,6 +708,10 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
     }
 
     for (int i = 0; i < toydefs_icon_count() && tb.nicons < TB_MAX_ICONS; i++) {
+        // Fidelity TODO: the lightweight grid deliberately bypasses
+        // IconToy#add_icon/IconGridStackItem. It therefore does not yet apply
+        // license enable/alpha state, globalToyInstanceLimit, leftovers, or
+        // script-provided icon rewrites; see rbh_catalog_finalize().
         const toyicon_t* def = toydefs_icon_at(i);
         const toydef_t* toy = toydefs_find(def->class_name);
         const int pack = pack_for_id(rbh_toy_pack(def->class_name));
