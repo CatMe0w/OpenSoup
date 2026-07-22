@@ -355,7 +355,8 @@ static void update_content_height(void) {
             continue;
         }
         h += TB_HEADER_H;
-        h += (float)((count + cols - 1) / cols) * TB_CELL_H;
+        const int rows = (count + cols - 1) / cols;  // ceil(count / cols)
+        h += (float)rows * TB_CELL_H;
         h += 8.0f;
     }
     tb.content_h = h;
@@ -415,7 +416,8 @@ static void layout_content(void) {
             asset_visible(&icon->asset, icon->onscreen);
             n++;
         }
-        y += (float)((pack->icon_count + cols - 1) / cols) * TB_CELL_H;
+        const int rows = (pack->icon_count + cols - 1) / cols;  // ceil(count / cols)
+        y += (float)rows * TB_CELL_H;
         y += 8.0f;
     }
 
