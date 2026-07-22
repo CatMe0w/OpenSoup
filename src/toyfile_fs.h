@@ -12,8 +12,15 @@ toyfile_status toyfile_extract_container(const toyfile* file,
                                          const char* directory,
                                          char* error, size_t error_size);
 
-// Installs discrete .toy files into a new assets root.
-toyfile_status toyfile_install_assets(const char* const* paths,
-                                      size_t count,
-                                      const char* assets_root,
-                                      char* error, size_t error_size);
+typedef struct {
+    const char* name;
+    const void* data;
+    size_t size;
+} toyfile_input;
+
+// Installs .toy containers into a new assets root. Input bytes are borrowed
+// only for the duration of the call.
+toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
+                                           size_t count,
+                                           const char* assets_root,
+                                           char* error, size_t error_size);

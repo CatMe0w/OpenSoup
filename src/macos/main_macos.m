@@ -47,6 +47,7 @@ static AppMenuActions* app_menu_actions;
 static void prepare_modal_ui(void) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [NSApp activateIgnoringOtherApps:YES];
 }
 
 static void show_quit_alert(NSString* message, NSString* information) {
@@ -78,7 +79,7 @@ static void show_missing_asset_alert(app_assets_state state) {
             @"OpenSoup could not find the required asset at:\n\n%@", missing]);
 }
 
-static void show_installer_picker(void) {
+static bool show_installer_picker(void) {
     prepare_modal_ui();
     NSOpenPanel* panel = [NSOpenPanel openPanel];
     panel.title = @"Select the original Souptoys installer";
@@ -92,8 +93,21 @@ static void show_installer_picker(void) {
     panel.allowedFileTypes = @[@"exe"];
 #pragma clang diagnostic pop
 
-    // The selected installer is intentionally not consumed yet.
-    [panel runModal];
+    if ([panel runModal] != NSModalResponseOK) {
+        return false;
+    }
+
+    const char* path = panel.URL.fileSystemRepresentation;
+    char error[1024] = {0};
+    if (path
+        && app_assets_install_from_installer(path, error, sizeof error)) {
+        return true;
+    }
+    NSString* information = error[0]
+        ? [NSString stringWithUTF8String:error]
+        : @"OpenSoup could not extract the selected installer.";
+    show_quit_alert(@"Game asset installation failed", information);
+    return false;
 }
 
 static NSRect visible_scene_frame(void) {
@@ -297,6 +311,7 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
     opensoup_start(logical_size.width, logical_size.height);
 
     [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 }
 - (void)applicationDidChangeScreenParameters:(NSNotification*)note {
     (void)note;
@@ -320,14 +335,14 @@ int main(void) {
         fprintf(stderr, "cannot resolve the assets path\n");
         return 1;
     }
-    const app_assets_state state = app_assets_get_state();
+    app_assets_state state = app_assets_get_state();
     if (state == APP_ASSETS_DIRECTORY_MISSING) {
         @autoreleasepool {
-            // XXX: unpack the selected payload, then call
-            // app_assets_install_toyfiles with its discrete .toy files
-            show_installer_picker();
+            if (!show_installer_picker()) {
+                return 1;
+            }
         }
-        return 1; // TODO
+        state = app_assets_get_state();
     }
     if (state != APP_ASSETS_READY) {
         @autoreleasepool {

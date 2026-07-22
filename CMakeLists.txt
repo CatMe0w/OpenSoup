@@ -25,6 +25,7 @@ set(SOKOL_DIR "${CMAKE_SOURCE_DIR}/vendor/sokol")
 set(CJSON_DIR "${CMAKE_SOURCE_DIR}/vendor/cjson")
 set(MINIAUDIO_DIR "${CMAKE_SOURCE_DIR}/vendor/miniaudio")
 set(STB_DIR "${CMAKE_SOURCE_DIR}/vendor/stb")
+set(LZMA_DIR "${CMAKE_SOURCE_DIR}/vendor/lzma")
 
 # stb_vorbis 1.22 contains a legacy pointer-wrap guard diagnosed by Clang
 set_source_files_properties(src/audio.c PROPERTIES
@@ -46,6 +47,7 @@ if(APPLE)
         src/physics.c
         src/toyfile.c
         src/toyfile_fs.c
+        src/nsis.c
         src/toydefs.c
         src/audio.c
         src/rubyhost.c
@@ -55,12 +57,14 @@ if(APPLE)
         src/rubyhost_realize.c
         src/rubyhost_sound.c
         vendor/cjson/cJSON.c
+        vendor/lzma/LzmaDec.c
         src/macos/app_paths.m
         src/macos/main_macos.m
         src/macos/sokol_impl.m
     )
     target_include_directories(opensoup PRIVATE
-        "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}" src)
+        "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}"
+        "${LZMA_DIR}" src)
     set_source_files_properties(
         src/macos/app_paths.m
         src/macos/main_macos.m

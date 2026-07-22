@@ -18,8 +18,8 @@ typedef enum {
 // Checks the fixed assets root and the minimum files needed to boot.
 app_assets_state app_assets_get_state(void);
 
-// Installs into a missing assets root and removes it again on failure.
-bool app_assets_install_toyfiles(const char* const* paths, size_t count,
-                                 char* error, size_t error_size);
+// Decodes the original installer in memory and installs its .toy files.
+bool app_assets_install_from_installer(const char* path,
+                                       char* error, size_t error_size);
 
 #endif

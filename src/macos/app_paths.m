@@ -1,11 +1,13 @@
 #import <Foundation/Foundation.h>
 
 #include "app_paths.h"
+#include "nsis.h"
 #include "toyfile_fs.h"
 
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -70,8 +72,9 @@ app_assets_state app_assets_get_state(void) {
     return APP_ASSETS_READY;
 }
 
-bool app_assets_install_toyfiles(const char* const* paths, size_t count,
-                                 char* error, size_t error_size) {
+static bool install_assets_from_decoded_toys(
+        const nsis_container* containers, size_t count,
+        char* error, size_t error_size) {
     const char* root = app_assets_root();
     if (!root) {
         if (error && error_size) {
@@ -95,8 +98,31 @@ bool app_assets_install_toyfiles(const char* const* paths, size_t count,
         return false;
     }
 
-    const toyfile_status status = toyfile_install_assets(
-        paths, count, root, error, error_size);
+    toyfile_input* inputs = calloc(count ? count : 1, sizeof(*inputs));
+    if (!inputs) {
+        if (error && error_size) {
+            snprintf(error, error_size,
+                     "out of memory indexing decoded .toy files");
+        }
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (containers[i].type != NSIS_CONTAINER_TOY) {
+            if (error && error_size) {
+                snprintf(error, error_size,
+                         "installer returned a non-.toy container");
+            }
+            free(inputs);
+            return false;
+        }
+        inputs[i] = (toyfile_input){
+            containers[i].name, containers[i].data, containers[i].size,
+        };
+    }
+
+    const toyfile_status status = toyfile_install_into_assets(
+        inputs, count, root, error, error_size);
+    free(inputs);
     if (status == TOYFILE_OK) {
         return true;
     }
@@ -118,4 +144,21 @@ bool app_assets_install_toyfiles(const char* const* paths, size_t count,
         }
     }
     return false;
+}
+
+bool app_assets_install_from_installer(const char* path,
+                                       char* error, size_t error_size) {
+    if (error && error_size) {
+        error[0] = 0;
+    }
+    if (!path || !path[0]) {
+        if (error && error_size) {
+            snprintf(error, error_size, "missing installer path");
+        }
+        return false;
+    }
+
+    return nsis_decode_containers(
+        path, NSIS_CONTAINER_TOY, install_assets_from_decoded_toys,
+        error, error_size);
 }

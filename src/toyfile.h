@@ -17,6 +17,11 @@ typedef enum {
 } toyfile_status;
 
 toyfile_status toyfile_open_path(const char* path, toyfile** out);
+
+// Parses bytes owned by the caller. They must remain valid until
+// toyfile_close().
+toyfile_status toyfile_open_memory(const void* data, size_t size,
+                                   toyfile** out);
 void toyfile_close(toyfile* file);
 
 // Human-readable parse/open error. Valid until toyfile_close().

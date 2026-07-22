@@ -428,15 +428,15 @@ toyfile_status toyfile_extract_container(const toyfile* file,
     return status;
 }
 
-toyfile_status toyfile_install_assets(const char* const* paths,
-                                      size_t count,
-                                      const char* assets_root,
-                                      char* error, size_t error_size) {
+toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
+                                           size_t count,
+                                           const char* assets_root,
+                                           char* error, size_t error_size) {
     fs_context fs = {error, error_size};
     if (fs.error && fs.error_size) {
         error[0] = 0;
     }
-    if (!paths || count == 0 || !assets_root || assets_root[0] != '/') {
+    if (!inputs || count == 0 || !assets_root || assets_root[0] != '/') {
         fs_error(&fs, "missing inputs or absolute assets root");
         return TOYFILE_INVALID_ARGUMENT;
     }
@@ -464,7 +464,7 @@ toyfile_status toyfile_install_assets(const char* const* paths,
     }
     toyfile_status status = TOYFILE_OK;
     for (size_t i = 0; i < count; i++) {
-        names[i] = container_name_from_path(paths[i], &fs, &status);
+        names[i] = container_name_from_path(inputs[i].name, &fs, &status);
         if (!names[i]) {
             break;
         }
@@ -503,11 +503,11 @@ toyfile_status toyfile_install_assets(const char* const* paths,
 
     for (size_t i = 0; status == TOYFILE_OK && i < count; i++) {
         toyfile* file = NULL;
-        status = toyfile_open_path(paths[i], &file);
+        status = toyfile_open_memory(inputs[i].data, inputs[i].size, &file);
         if (status != TOYFILE_OK) {
             char detail[320];
             snprintf(detail, sizeof detail, "%s", toyfile_error(file));
-            fs_error(&fs, "cannot import %s: %s", paths[i], detail);
+            fs_error(&fs, "cannot import %s: %s", inputs[i].name, detail);
             toyfile_close(file);
             break;
         }

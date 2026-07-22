@@ -26,6 +26,7 @@ typedef struct {
 struct toyfile {
     unsigned char* data;
     size_t size;
+    bool owns_data;
     size_t magic_offset;
     size_t resource_data_offset;
     toyfile_resource* resources;
@@ -1103,6 +1104,7 @@ toyfile_status toyfile_open_path(const char* path, toyfile** out) {
         file_error(file, "out of memory reading %s", path);
         return TOYFILE_OUT_OF_MEMORY;
     }
+    file->owns_data = true;
     if (fread(file->data, 1, (size_t)length, input) != (size_t)length) {
         fclose(input);
         file_error(file, "short read from %s", path);
@@ -1113,13 +1115,35 @@ toyfile_status toyfile_open_path(const char* path, toyfile** out) {
     return parse_file(file);
 }
 
+toyfile_status toyfile_open_memory(const void* data, size_t size,
+                                   toyfile** out) {
+    if (!out) {
+        return TOYFILE_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+    toyfile* file = calloc(1, sizeof(*file));
+    if (!file) {
+        return TOYFILE_OUT_OF_MEMORY;
+    }
+    *out = file;
+    if (!data || size == 0) {
+        file_error(file, "missing input data");
+        return TOYFILE_INVALID_ARGUMENT;
+    }
+    file->data = (unsigned char*)data;
+    file->size = size;
+    return parse_file(file);
+}
+
 void toyfile_close(toyfile* file) {
     if (!file) {
         return;
     }
     free(file->resources);
     free(file->manifest_json);
-    free(file->data);
+    if (file->owns_data) {
+        free(file->data);
+    }
     free(file);
 }
 
