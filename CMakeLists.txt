@@ -44,6 +44,8 @@ if(APPLE)
         src/toybox_button.c
         src/toybox_scroll.c
         src/physics.c
+        src/toyfile.c
+        src/toyfile_fs.c
         src/toydefs.c
         src/audio.c
         src/rubyhost.c
@@ -101,6 +103,8 @@ if(APPLE)
         src/toybox_button.c
         src/toybox_scroll.c
         src/physics.c
+        src/toyfile.c
+        src/toyfile_fs.c
         src/toydefs.c
         src/audio.c
         vendor/cjson/cJSON.c
