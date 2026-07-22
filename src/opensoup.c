@@ -45,6 +45,12 @@ bool opensoup_boot(const char* assets_root) {
     }
     printf("opensoup: Preloaded %d/%d toy classes\n", preloaded,
            toydefs_count());
+    if (!rbh_catalog_finalize()) {
+        fprintf(stderr, "opensoup: could not finalize Toybox catalog\n");
+        return false;
+    }
+    printf("opensoup: Registered %d Toybox packs from CToy scripts\n",
+           rbh_toypack_count());
     return true;
 }
 

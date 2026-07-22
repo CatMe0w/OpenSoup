@@ -45,6 +45,21 @@ bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m);
 // instantiating it - for classes other toys reference (Goose -> GooseEgg)
 bool rbh_load_toy_class(const char* class_name, const char* class_dir);
 
+// Freeze the Toybox catalog after all CToy class scripts have run. Pack rows
+// come from IconToy.add_toypack; membership comes from the final
+// Souptoys#get_license_properties result (including script overrides).
+typedef struct {
+    const char* id;
+    const char* license;
+    const char* sprite_path;
+    float order;
+} rbh_toypack;
+
+bool rbh_catalog_finalize(void);
+int rbh_toypack_count(void);
+const rbh_toypack* rbh_toypack_at(int index);
+const char* rbh_toy_pack(const char* class_name);
+
 // Per-frame heartbeat: accumulates dt into fixed 0.01s steps and drives
 // $default_engine.run_steps + dispatch_timers through the framework.
 void rbh_frame(double dt_ms);

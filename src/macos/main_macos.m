@@ -65,9 +65,7 @@ static void show_quit_alert(NSString* message, NSString* information) {
 
 static void show_missing_asset_alert(app_assets_state state) {
     NSString* name = nil;
-    if (state == APP_ASSETS_PACKS_MISSING) {
-        name = @"packs.json";
-    } else if (state == APP_ASSETS_CORE_MISSING) {
+    if (state == APP_ASSETS_CORE_MISSING) {
         name = @"souptoys_core_toy/resources";
     } else {
         return;

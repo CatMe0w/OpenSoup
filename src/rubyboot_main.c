@@ -166,41 +166,21 @@ int main(int argc, char** argv) {
         audio_shutdown();
         return 1;
     }
-    if (toydefs_pack_count() < 7 || toydefs_icon_count() < 80) {
-        fprintf(stderr, "rubyboot: Toybox catalog missing (%d packs, %d icons)\n",
-                toydefs_pack_count(), toydefs_icon_count());
-        audio_shutdown();
-        return 1;
-    }
-    fprintf(stderr, "rubyboot: Toybox catalog %d packs, %d manifest icons\n",
-            toydefs_pack_count(), toydefs_icon_count());
-    int sports_icons = 0;
-    bool essbee_in_astrobots = false;
-    for (int i = 0; i < toydefs_icon_count(); i++) {
-        const toyicon_t* icon = toydefs_icon_at(i);
-        if (!icon) {
-            continue;
-        }
-        if (icon->pack && strcmp(icon->pack, "Sports") == 0) {
-            sports_icons++;
-        }
-        if (strcmp(icon->class_name, "REssBee") == 0 && icon->pack &&
-            strcmp(icon->pack, "Astrobots") == 0) {
-            essbee_in_astrobots = true;
-        }
-    }
-    if (sports_icons != 10 || !essbee_in_astrobots) {
+    if (toydefs_icon_count() < 80 ||
+        toydefs_license_property_count() < 100) {
         fprintf(stderr,
-                "rubyboot: Toybox pack mapping wrong (Sports=%d, Essbee=%s)\n",
-                sports_icons, essbee_in_astrobots ? "Astrobots" : "other");
+                "rubyboot: container manifests missing (%d properties, %d icons)\n",
+                toydefs_license_property_count(), toydefs_icon_count());
         audio_shutdown();
         return 1;
     }
+    fprintf(stderr, "rubyboot: %d manifest properties, %d icons\n",
+            toydefs_license_property_count(), toydefs_icon_count());
     int decoded_icons = 0;
     int decoded_icon_frames = 0;
     for (int i = 0; i < toydefs_icon_count(); i++) {
         const toyicon_t* icon = toydefs_icon_at(i);
-        if (!icon || !icon->pack) {
+        if (!icon) {
             continue;
         }
         const int frames = icon->num_frames < 6 ? icon->num_frames : 6;
@@ -222,6 +202,53 @@ int main(int argc, char** argv) {
             decoded_icons, decoded_icon_frames);
 
     bool ok = rbh_boot(assets);
+    for (int i = 0; ok && i < toydefs_count(); i++) {
+        const toydef_t* def = toydefs_at(i);
+        char dir[1200];
+        container_resource_root(dir, sizeof dir, assets, def->root);
+        ok = rbh_load_toy_class(def->class_name, dir);
+    }
+    if (ok) {
+        ok = rbh_catalog_finalize();
+    }
+    int sports_icons = 0;
+    bool essbee_in_astrobots = false;
+    for (int i = 0; ok && i < toydefs_icon_count(); i++) {
+        const toyicon_t* icon = toydefs_icon_at(i);
+        const char* pack = rbh_toy_pack(icon->class_name);
+        if (pack && strcmp(pack, "Sports") == 0) {
+            sports_icons++;
+        }
+        if (strcmp(icon->class_name, "REssBee") == 0 && pack &&
+            strcmp(pack, "Astrobots") == 0) {
+            essbee_in_astrobots = true;
+        }
+    }
+    if (ok && (rbh_toypack_count() < 7 || sports_icons != 10 ||
+               !essbee_in_astrobots)) {
+        fprintf(stderr,
+                "rubyboot: runtime Toybox catalog wrong (%d packs, Sports=%d, Essbee=%s)\n",
+                rbh_toypack_count(), sports_icons,
+                essbee_in_astrobots ? "Astrobots" : "other");
+        ok = false;
+    }
+    for (int i = 0; ok && i < rbh_toypack_count(); i++) {
+        const rbh_toypack* pack = rbh_toypack_at(i);
+        char header[1200];
+        if (!toydefs_pack_header(pack->id, pack->sprite_path, header,
+                                 sizeof header)) {
+            ok = false;
+            break;
+        }
+        snprintf(path, sizeof path, "%s/%s0000.tga", assets, header);
+        as_image image = {0};
+        ok = ok && as_load_tga(path, &image);
+        as_image_free(&image);
+    }
+    if (ok) {
+        fprintf(stderr, "rubyboot: %d packs registered by CToy scripts\n",
+                rbh_toypack_count());
+    }
 
     // Milestone: World toy exists per engine and the walls follow the screen
     // through the whole framework chain: screen_size_changed ->

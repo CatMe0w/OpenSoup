@@ -3,10 +3,10 @@
 
 // The extracted-assets tree convention, in one place. Each container
 // (<name>_toy / <name>_playset dir under the assets root) is a self-contained
-// unit holding two parallel subtrees:
-//   assets/<container>/defs/<classname>.json  decoded CToy defs (+ icon)
+// unit holding the decoded parts of that one original container:
+//   assets/<container>/manifest.json          properties + icon catalog
+//   assets/<container>/defs/<classname>.json  decoded CToy records
 //   assets/<container>/resources/...          resource VFS
-// Cross-container pack metadata lives at assets/packs.json.
 static inline int container_resource_root(char* out, size_t cap,
                                           const char* assets_root,
                                           const char* container) {

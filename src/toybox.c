@@ -37,7 +37,8 @@ typedef struct {
 } tb_asset;
 
 typedef struct {
-    const toypack_t* def;
+    const rbh_toypack* def;
+    char header_path[1024];
     tb_asset header;
     int icon_count;
     float x, y;
@@ -344,6 +345,27 @@ static int pack_for_id(const char* pack_id) {
         }
     }
     return -1;
+}
+
+static void sort_icons(void) {
+    // IconGridStackItem sorts greater orders first. Insertion sort preserves
+    // manifest order when two entries have the same order.
+    for (int i = 1; i < tb.nicons; i++) {
+        tb_icon icon = tb.icons[i];
+        int j = i;
+        while (j > 0) {
+            const tb_icon* prev = &tb.icons[j - 1];
+            const bool before = icon.pack < prev->pack ||
+                (icon.pack == prev->pack &&
+                 icon.def->order > prev->def->order);
+            if (!before) {
+                break;
+            }
+            tb.icons[j] = tb.icons[j - 1];
+            j--;
+        }
+        tb.icons[j] = icon;
+    }
 }
 
 static void update_content_height(void) {
@@ -668,19 +690,27 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
                            toggle, on);
     }
 
-    for (int i = 0; i < toydefs_pack_count() && tb.npacks < TB_MAX_PACKS; i++) {
-        const toypack_t* def = toydefs_pack_at(i);
-        tb_pack* pack = &tb.packs[tb.npacks++];
+    for (int i = 0; i < rbh_toypack_count() && tb.npacks < TB_MAX_PACKS; i++) {
+        const rbh_toypack* def = rbh_toypack_at(i);
+        tb_pack* pack = &tb.packs[tb.npacks];
         memset(pack, 0, sizeof(*pack));
+        if (!toydefs_pack_header(def->id, def->sprite_path,
+                                 pack->header_path,
+                                 sizeof pack->header_path)) {
+            fprintf(stderr, "toybox: no CToy header owner for pack %s\n",
+                    def->id);
+            continue;
+        }
         pack->def = def;
         asset_reset(&pack->header);
-        asset_load_sequence(&pack->header, def->header, 1, tb.x, tb.y);
+        asset_load_sequence(&pack->header, pack->header_path, 1, tb.x, tb.y);
+        tb.npacks++;
     }
 
     for (int i = 0; i < toydefs_icon_count() && tb.nicons < TB_MAX_ICONS; i++) {
         const toyicon_t* def = toydefs_icon_at(i);
         const toydef_t* toy = toydefs_find(def->class_name);
-        const int pack = pack_for_id(def->pack);
+        const int pack = pack_for_id(rbh_toy_pack(def->class_name));
         if (!toy || pack < 0) {
             continue;
         }
@@ -700,6 +730,7 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
         tb.packs[pack].icon_count++;
         tb.nicons++;
     }
+    sort_icons();
 
     tb.ready = true;
     layout_shell();

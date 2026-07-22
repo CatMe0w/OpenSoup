@@ -8,14 +8,14 @@
 
 #define MAX_DEFS 256
 #define MAX_ICONS 256
-#define MAX_PACKS 32
+#define MAX_PROPERTIES 1024
 
 static toydef_t defs[MAX_DEFS];
 static int ndefs;
 static toyicon_t icons[MAX_ICONS];
 static int nicons;
-static toypack_t packs[MAX_PACKS];
-static int npacks;
+static toyprop_t properties[MAX_PROPERTIES];
+static int nproperties;
 
 static float num(const cJSON* obj, const char* key, float fallback) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -50,6 +50,30 @@ static char* resolve_location(const char* container, const char* loc) {
         snprintf(buf, sizeof buf, "%s/resources/defs/%s", container, loc);
     }
     return strdup(buf);
+}
+
+static td_sprite* parse_sprites(const cJSON* owner, const char* container,
+                                int* count) {
+    const cJSON* sprites = cJSON_GetObjectItemCaseSensitive(owner, "sprite");
+    *count = cJSON_GetArraySize(sprites);
+    td_sprite* parsed = calloc((size_t)*count ? (size_t)*count : 1,
+                               sizeof(*parsed));
+    int i = 0;
+    const cJSON* sprite;
+    cJSON_ArrayForEach(sprite, sprites) {
+        td_sprite* d = &parsed[i++];
+        d->sid = dupstr(sprite, "id");
+        char* loc = dupstr(sprite, "imageLocation");
+        d->image = loc ? resolve_location(container, loc) : NULL;
+        free(loc);
+        d->num_frames = (int)num(sprite, "numFrames", 1);
+        const cJSON* com = cJSON_GetObjectItemCaseSensitive(
+            sprite, "objectCentreOfMass");
+        d->com[0] = idx(com, 0, 0.0f);
+        d->com[1] = idx(com, 1, 0.0f);
+        d->z_order = (int)num(sprite, "zOrder", 0);
+    }
+    return parsed;
 }
 
 static void parse_limb(td_limb* l, const cJSON* limb, const char* container) {
@@ -120,23 +144,7 @@ static void parse_limb(td_limb* l, const cJSON* limb, const char* container) {
         }
     }
 
-    const cJSON* sprites = cJSON_GetObjectItemCaseSensitive(limb, "sprite");
-    l->nsprites = cJSON_GetArraySize(sprites);
-    l->sprites = calloc((size_t)l->nsprites ? (size_t)l->nsprites : 1, sizeof(td_sprite));
-    int pi = 0;
-    const cJSON* sp;
-    cJSON_ArrayForEach(sp, sprites) {
-        td_sprite* d = &l->sprites[pi++];
-        d->sid = dupstr(sp, "id");
-        char* loc = dupstr(sp, "imageLocation");
-        d->image = loc ? resolve_location(container, loc) : NULL;
-        free(loc);
-        d->num_frames = (int)num(sp, "numFrames", 1);
-        const cJSON* com = cJSON_GetObjectItemCaseSensitive(sp, "objectCentreOfMass");
-        d->com[0] = idx(com, 0, 0.0f);
-        d->com[1] = idx(com, 1, 0.0f);
-        d->z_order = (int)num(sp, "zOrder", 0);
-    }
+    l->sprites = parse_sprites(limb, container, &l->nsprites);
 
     // motors fold to constant per-limb force/torque; the on/off scripting
     // (Ruby motor.force=) comes with the runtime milestone
@@ -183,42 +191,104 @@ static cJSON* parse_json_file(const char* path) {
     return root;
 }
 
-static bool load_packs(const char* assets_root) {
-    char path[1024];
-    snprintf(path, sizeof path, "%s/packs.json", assets_root);
-    cJSON* root = parse_json_file(path);
-    if (!root) {
-        return false;
+static void set_property(const char* key, const cJSON* value) {
+    if (!cJSON_IsString(value) && !cJSON_IsNumber(value)) {
+        return;
     }
-    const cJSON* pack;
-    cJSON_ArrayForEach(pack, cJSON_GetObjectItemCaseSensitive(root, "packs")) {
-        if (npacks >= MAX_PACKS) {
+    toyprop_t* p = NULL;
+    for (int i = 0; i < nproperties; i++) {
+        if (strcmp(properties[i].key, key) == 0) {
+            p = &properties[i];
+            free((char*)p->string);
+            p->string = NULL;
             break;
         }
-        toypack_t* p = &packs[npacks++];
-        p->id = dupstr(pack, "id");
-        p->license = dupstr(pack, "license");
-        // header art = a resource key inside a container's VFS
-        const cJSON* hdr = cJSON_GetObjectItemCaseSensitive(pack, "header");
-        char* container = dupstr(hdr, "container");
-        char* resource = dupstr(hdr, "resource");
-        if (container && resource) {
-            char buf[1024];
-            snprintf(buf, sizeof buf, "%s/resources/%s", container, resource);
-            p->header = strdup(buf);
-        } else {
-            p->header = NULL;
-        }
-        free(container);
-        free(resource);
-        p->order = num(pack, "order", (float)npacks);
     }
-    cJSON_Delete(root);
-    return true;
+    if (!p) {
+        if (nproperties >= MAX_PROPERTIES) {
+            return;
+        }
+        p = &properties[nproperties++];
+        p->key = strdup(key);
+    }
+    if (cJSON_IsString(value)) {
+        p->kind = TOYPROP_STRING;
+        p->string = strdup(value->valuestring);
+    } else if (cJSON_IsNumber(value)) {
+        p->number = value->valuedouble;
+        p->kind = value->valuedouble == (double)value->valueint
+                ? TOYPROP_INTEGER : TOYPROP_FLOAT;
+    }
 }
 
-// One <container>/defs/<classname>.json: a toy def with its (optional)
-// Toybox icon catalog entry embedded.
+static void load_properties(const cJSON* manifest) {
+    const cJSON* group;
+    cJSON_ArrayForEach(
+        group, cJSON_GetObjectItemCaseSensitive(manifest, "properties")) {
+        if (!group->string || strncmp(group->string, "license.", 8) != 0 ||
+            !cJSON_IsObject(group)) {
+            continue;
+        }
+        const cJSON* value;
+        cJSON_ArrayForEach(value, group) {
+            if (value->string) {
+                set_property(value->string, value);
+            }
+        }
+    }
+}
+
+static void load_icons(const cJSON* manifest, const char* container) {
+    const cJSON* icon;
+    cJSON_ArrayForEach(
+        icon, cJSON_GetObjectItemCaseSensitive(manifest, "icons")) {
+        const cJSON* open = NULL;
+        int nopen = 0;
+        const cJSON* event;
+        cJSON_ArrayForEach(
+            event, cJSON_GetObjectItemCaseSensitive(icon, "event")) {
+            const cJSON* action;
+            cJSON_ArrayForEach(
+                action, cJSON_GetObjectItemCaseSensitive(event, "action")) {
+                const cJSON* candidate = cJSON_GetObjectItemCaseSensitive(
+                    action, "openToyInstance");
+                if (cJSON_IsString(candidate)) {
+                    open = action;
+                    nopen++;
+                }
+            }
+        }
+        if (nopen != 1 || nicons >= MAX_ICONS) {
+            continue; // non-spawning UI actions do not become catalog icons
+        }
+
+        const cJSON* sprite = cJSON_GetObjectItemCaseSensitive(icon, "sprite");
+        char* loc = dupstr(sprite, "imageLocation");
+        toyicon_t* i = &icons[nicons++];
+        i->name = dupstr(icon, "id");
+        i->class_name = dupstr(open, "openToyInstance");
+        i->image = loc ? resolve_location(container, loc) : NULL;
+        free(loc);
+        i->num_frames = (int)num(sprite, "numFrames", 1.0f);
+        i->instance_limit = (int)num(open, "globalToyInstanceLimit", 100.0f);
+        i->order = num(icon, "order", 0.0f);
+    }
+}
+
+static void load_manifest(const char* assets_root, const char* container) {
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s/manifest.json", assets_root,
+             container);
+    cJSON* manifest = parse_json_file(path);
+    if (!manifest) {
+        return; // loose (mod?) containers may consist of defs/resources only
+    }
+    load_properties(manifest);
+    load_icons(manifest, container);
+    cJSON_Delete(manifest);
+}
+
+// One <container>/defs/<classname>.json: one original CToy record.
 static void load_toy_file(const char* path, const char* container) {
     cJSON* toy = parse_json_file(path);
     if (!toy) {
@@ -232,27 +302,9 @@ static void load_toy_file(const char* path, const char* container) {
         return;
     }
 
-    const cJSON* icon = cJSON_GetObjectItemCaseSensitive(toy, "icon");
-    if (cJSON_IsObject(icon) && nicons < MAX_ICONS) {
-        toyicon_t* i = &icons[nicons++];
-        i->name = dupstr(icon, "displayName");
-        i->class_name = strdup(class_name);
-        // the icon may come from a different container than the def
-        // (christmas07 re-icons the toys_toybox C06 classes)
-        char* src = dupstr(icon, "container");
-        char* loc = dupstr(icon, "imageLocation");
-        i->image = loc ? resolve_location(src ? src : container, loc) : NULL;
-        free(src);
-        free(loc);
-        i->num_frames = (int)num(icon, "numFrames", 1.0f);
-        i->instance_limit = (int)num(icon, "globalToyInstanceLimit", 100.0f);
-        i->pack = dupstr(icon, "pack");
-        i->catalog_index = (int)num(icon, "catalogIndex", (float)nicons);
-    }
-
     const cJSON* limbs = cJSON_GetObjectItemCaseSensitive(toy, "limb");
     const int nlimbs = cJSON_GetArraySize(limbs);
-    if (nlimbs < 1 || ndefs >= MAX_DEFS) {
+    if (ndefs >= MAX_DEFS) {
         free(class_name);
         cJSON_Delete(toy);
         return;
@@ -262,8 +314,10 @@ static void load_toy_file(const char* path, const char* container) {
         d->class_name = class_name;
         d->root = strdup(container);
         d->base_scale = num(toy, "baseScale", 1.0f);
+        d->sprites = parse_sprites(toy, container, &d->nsprites);
         d->nlimbs = nlimbs;
-        d->limbs = calloc((size_t)nlimbs, sizeof(td_limb));
+        d->limbs = calloc((size_t)nlimbs ? (size_t)nlimbs : 1,
+                          sizeof(td_limb));
         int li = 0;
         const cJSON* limb;
         cJSON_ArrayForEach(limb, limbs) {
@@ -339,12 +393,8 @@ static bool has_suffix(const char* name, const char* suffix) {
     return n >= s && strcmp(name + n - s, suffix) == 0;
 }
 
-static int cmp_icon_catalog(const void* a, const void* b) {
-    return ((const toyicon_t*)a)->catalog_index
-         - ((const toyicon_t*)b)->catalog_index;
-}
-
 static void load_container(const char* assets_root, const char* container) {
+    load_manifest(assets_root, container);
     char dir[1024];
     snprintf(dir, sizeof dir, "%s/%s/defs", assets_root, container);
     struct dirent** entries = NULL;
@@ -364,9 +414,6 @@ bool toydefs_load(const char* assets_root) {
     if (ndefs > 0) {
         return true; // already loaded by the application bootstrap
     }
-    if (!load_packs(assets_root)) {
-        return false;
-    }
     struct dirent** entries = NULL;
     const int n = scandir(assets_root, &entries, NULL, alphasort);
     for (int i = 0; i < n; i++) {
@@ -376,7 +423,6 @@ bool toydefs_load(const char* assets_root) {
         free(entries[i]);
     }
     free(entries);
-    qsort(icons, (size_t)nicons, sizeof icons[0], cmp_icon_catalog);
     return ndefs > 0;
 }
 
@@ -405,10 +451,34 @@ const toyicon_t* toydefs_icon_at(int index) {
     return index >= 0 && index < nicons ? &icons[index] : NULL;
 }
 
-int toydefs_pack_count(void) {
-    return npacks;
+int toydefs_license_property_count(void) {
+    return nproperties;
 }
 
-const toypack_t* toydefs_pack_at(int index) {
-    return index >= 0 && index < npacks ? &packs[index] : NULL;
+const toyprop_t* toydefs_license_property_at(int index) {
+    return index >= 0 && index < nproperties ? &properties[index] : NULL;
+}
+
+bool toydefs_pack_header(const char* pack_id, const char* sprite_path,
+                         char* out, size_t cap) {
+    if (!pack_id || !sprite_path || !out || cap == 0) {
+        return false;
+    }
+    char sid[256];
+    snprintf(sid, sizeof sid, "%s.header.label", pack_id);
+    for (int i = 0; i < ndefs; i++) {
+        const toydef_t* d = &defs[i];
+        for (int j = 0; j < d->nsprites; j++) {
+            if (d->sprites[j].sid && strcmp(d->sprites[j].sid, sid) == 0) {
+                char* resolved = resolve_location(d->root, sprite_path);
+                const bool fits = strlen(resolved) < cap;
+                if (fits) {
+                    strcpy(out, resolved);
+                }
+                free(resolved);
+                return fits;
+            }
+        }
+    }
+    return false;
 }

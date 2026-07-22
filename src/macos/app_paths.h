@@ -11,7 +11,6 @@ const char* app_assets_root(void);
 typedef enum {
     APP_ASSETS_READY,
     APP_ASSETS_DIRECTORY_MISSING,
-    APP_ASSETS_PACKS_MISSING,
     APP_ASSETS_CORE_MISSING,
 } app_assets_state;
 

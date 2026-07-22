@@ -1,12 +1,11 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 // Toy definitions loaded from the assets tree: one JSON per toy def at
-// <assets>/<container>/defs/<classname>.json (icon catalog entry embedded),
-// plus cross-container pack metadata at <assets>/packs.json (see
-// assets_layout.h). Interim pipeline: the original parses the binary defs
-// natively (BinaryToyReader); whether we port that reader to C or keep the
-// external converter is deliberately deferred.
+// <assets>/<container>/defs/<classname>.json, plus that container's original
+// property groups and icon catalog at <assets>/<container>/manifest.json (see
+// assets_layout.h).
 //
 // Units: geometry (rest positions, shape points, joint anchors) is in
 // TOY-LOCAL units; instantiation scales by base_scale into world meters
@@ -97,6 +96,8 @@ typedef struct {
     td_joint* joints;
     int nrotjoints;
     td_rotjoint* rotjoints;
+    int nsprites;
+    td_sprite* sprites; // toy-level sprites (not attached to a physics limb)
     int nsounds;
     td_sound* sounds; // toy-level sound emitters
 } toydef_t;
@@ -111,17 +112,21 @@ typedef struct {
     const char* image;
     int num_frames;
     int instance_limit;
-    const char* pack;  // pack id into packs.json; NULL = not shown (HelpToy)
-    int catalog_index; // frozen global Toybox order (defs files are unordered)
+    float order; // order inside the pack selected by the runtime properties
 } toyicon_t;
 
+typedef enum {
+    TOYPROP_FLOAT,
+    TOYPROP_INTEGER,
+    TOYPROP_STRING,
+} toyprop_kind;
+
 typedef struct {
-    const char* id;
-    const char* license;
-    const char* header; // TGA sequence prefix, resolved from packs.json's
-                        // {container, resource} at load (assets-root-relative)
-    float order;
-} toypack_t;
+    const char* key;
+    toyprop_kind kind;
+    double number;
+    const char* string;
+} toyprop_t;
 
 bool toydefs_load(const char* assets_root);
 const toydef_t* toydefs_find(const char* class_name);
@@ -129,5 +134,11 @@ int toydefs_count(void);
 const toydef_t* toydefs_at(int index);
 int toydefs_icon_count(void);
 const toyicon_t* toydefs_icon_at(int index);
-int toydefs_pack_count(void);
-const toypack_t* toydefs_pack_at(int index);
+int toydefs_license_property_count(void);
+const toyprop_t* toydefs_license_property_at(int index);
+
+// add_toypack's sprite path is relative to the container which owns the
+// matching <pack>.header.label toy-level sprite. Resolve it without storing a
+// container name in global metadata.
+bool toydefs_pack_header(const char* pack_id, const char* sprite_path,
+                         char* out, size_t cap);

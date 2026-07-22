@@ -21,10 +21,15 @@ void Init_ext(void); // ext/extinit.o: static stringio + syck
 // registry
 
 #define MAX_CLASSES 40
+#define MAX_TOYPACKS 32
 static struct { const char* cname; VALUE cls; } g_reg[MAX_CLASSES];
 static int g_nreg;
 char g_assets[1024]; // the assets tree root (per-container defs + resources)
 char g_root[1024];   // souptoys_core_toy resource root (framework scripts)
+static VALUE g_license_properties;
+static VALUE g_runtime_license_properties;
+static rbh_toypack g_toypacks[MAX_TOYPACKS];
+static int g_ntoypacks;
 
 VALUE cls_find(const char* name) {
     for (int i = 0; i < g_nreg; i++) {
@@ -105,6 +110,11 @@ static VALUE soup_get_license_policy(VALUE self) {
     return sn_get(self)->license_policy;
 }
 
+static VALUE soup_get_license_properties(VALUE self) {
+    (void)self;
+    return g_license_properties;
+}
+
 static VALUE soup_load_paths(VALUE self) {
     VALUE v = sn_get(self)->load_paths;
     return NIL_P(v) ? rb_ary_new() : v;
@@ -179,10 +189,36 @@ static void register_soup(void) {
     rb_define_method(c, "resource_load", soup_resource_load, 1);
     rb_define_method(c, "set_license_policy", soup_set_license_policy, 1);
     rb_define_method(c, "get_license_policy", soup_get_license_policy, 0);
+    rb_define_method(c, "get_license_properties",
+                     soup_get_license_properties, 0);
     rb_define_method(c, "load_paths", soup_load_paths, 0);
     rb_define_method(c, "load_paths=", soup_load_paths_set, 1);
     rb_define_method(c, "exe_path", soup_exe_path, 0);
     rb_define_method(c, "console_open?", soup_console_open_p, 0);
+}
+
+static void build_license_properties(void) {
+    g_license_properties = rb_hash_new();
+    rb_global_variable(&g_license_properties);
+    for (int i = 0; i < toydefs_license_property_count(); i++) {
+        const toyprop_t* p = toydefs_license_property_at(i);
+        if (!p || !p->key) {
+            continue;
+        }
+        VALUE value;
+        switch (p->kind) {
+            case TOYPROP_STRING:
+                value = rb_str_new2(p->string ? p->string : "");
+                break;
+            case TOYPROP_INTEGER:
+                value = LONG2NUM((long)p->number);
+                break;
+            case TOYPROP_FLOAT:
+                value = rb_float_new(p->number);
+                break;
+        }
+        rb_hash_aset(g_license_properties, rb_str_new2(p->key), value);
+    }
 }
 
 // boot
@@ -336,6 +372,7 @@ bool rbh_boot(const char* assets_root) {
         core_add_engine(core, e);
     }
     rb_gv_set("$engine", rb_obj_alloc(cls_find("Souptoys")));
+    build_license_properties();
 
     char lp[sizeof g_root + 32];
     snprintf(lp, sizeof lp, "$:.clear(); $: << '%s'", g_root);
@@ -356,6 +393,14 @@ bool rbh_boot(const char* assets_root) {
     }
 
     if (!rbh_eval(BOOTSTRAP, "souptoys.rb bootstrap")) {
+        return false;
+    }
+
+    // Pack scripts guard on IconToy.instance. A headless instance retains
+    // their add_toypack calls in IconToy.toypacks without constructing the
+    // original physics-backed IconGrid UI.
+    if (!rbh_eval("$opensoup_icon_toy = IconToy.new(nil, nil, nil)",
+                  "IconToy catalog")) {
         return false;
     }
 
@@ -387,6 +432,83 @@ bool rbh_load_toy_class(const char* class_name, const char* class_dir) {
              "ToyClassResolver.load_toy_class('%s', Pathname.new('%s'))\n",
              class_name, abs_dir(class_dir, abs));
     return rbh_eval(code, class_name);
+}
+
+static int cmp_toypack(const void* a, const void* b) {
+    const rbh_toypack* pa = a;
+    const rbh_toypack* pb = b;
+    if (pa->order < pb->order) {
+        return -1;
+    }
+    if (pa->order > pb->order) {
+        return 1;
+    }
+    return strcmp(pa->id, pb->id);
+}
+
+bool rbh_catalog_finalize(void) {
+    static const char* snapshot =
+        "$opensoup_license_properties = $engine.get_license_properties;"
+        "$opensoup_toypacks = IconToy.toypacks.map { |id, p|"
+        " [id.to_s, p[:license].to_s, p[:sprite_path].to_s, p[:order].to_f]"
+        " }";
+    if (!rbh_eval(snapshot, "Toybox catalog")) {
+        return false;
+    }
+    g_runtime_license_properties = rb_gv_get("$opensoup_license_properties");
+    VALUE rows = rb_gv_get("$opensoup_toypacks");
+    if (TYPE(rows) != T_ARRAY) {
+        return false;
+    }
+
+    for (int i = 0; i < g_ntoypacks; i++) {
+        free((char*)g_toypacks[i].id);
+        free((char*)g_toypacks[i].license);
+        free((char*)g_toypacks[i].sprite_path);
+    }
+    g_ntoypacks = 0;
+    const long count = RARRAY(rows)->len;
+    for (long i = 0; i < count && g_ntoypacks < MAX_TOYPACKS; i++) {
+        VALUE row = rb_ary_entry(rows, i);
+        if (TYPE(row) != T_ARRAY || RARRAY(row)->len != 4) {
+            continue;
+        }
+        VALUE id = rb_ary_entry(row, 0);
+        VALUE license = rb_ary_entry(row, 1);
+        VALUE sprite_path = rb_ary_entry(row, 2);
+        VALUE order = rb_ary_entry(row, 3);
+        if (TYPE(id) != T_STRING || TYPE(license) != T_STRING ||
+            TYPE(sprite_path) != T_STRING || TYPE(order) != T_FLOAT) {
+            continue;
+        }
+        rbh_toypack* pack = &g_toypacks[g_ntoypacks++];
+        pack->id = strdup(StringValueCStr(id));
+        pack->license = strdup(StringValueCStr(license));
+        pack->sprite_path = strdup(StringValueCStr(sprite_path));
+        pack->order = (float)NUM2DBL(order);
+    }
+    qsort(g_toypacks, (size_t)g_ntoypacks, sizeof g_toypacks[0],
+          cmp_toypack);
+    return true;
+}
+
+int rbh_toypack_count(void) {
+    return g_ntoypacks;
+}
+
+const rbh_toypack* rbh_toypack_at(int index) {
+    return index >= 0 && index < g_ntoypacks ? &g_toypacks[index] : NULL;
+}
+
+const char* rbh_toy_pack(const char* class_name) {
+    if (!class_name || TYPE(g_runtime_license_properties) != T_HASH) {
+        return NULL;
+    }
+    char key[512];
+    snprintf(key, sizeof key, "%s.toypack", class_name);
+    VALUE value = rb_hash_aref(g_runtime_license_properties,
+                               rb_str_new2(key));
+    return TYPE(value) == T_STRING ? StringValueCStr(value) : NULL;
 }
 
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,

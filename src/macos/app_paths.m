@@ -52,13 +52,6 @@ app_assets_state app_assets_get_state(void) {
             return APP_ASSETS_DIRECTORY_MISSING;
         }
 
-        NSURL* packs = [root URLByAppendingPathComponent:@"packs.json"
-                                             isDirectory:NO];
-        if (![files fileExistsAtPath:packs.path isDirectory:&is_directory]
-            || is_directory) {
-            return APP_ASSETS_PACKS_MISSING;
-        }
-
         NSURL* core = [[root
             URLByAppendingPathComponent:@"souptoys_core_toy" isDirectory:YES]
             URLByAppendingPathComponent:@"resources" isDirectory:YES];
