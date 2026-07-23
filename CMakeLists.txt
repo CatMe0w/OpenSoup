@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 
-if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT CMAKE_TOOLCHAIN_FILE)
+if(CMAKE_HOST_APPLE
+   AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET
+   AND NOT CMAKE_TOOLCHAIN_FILE)
     if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
        (NOT CMAKE_OSX_ARCHITECTURES AND
         CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64"))
@@ -32,10 +34,15 @@ set_source_files_properties(src/audio.c PROPERTIES
     COMPILE_OPTIONS "-Wno-tautological-compare"
 )
 
+if(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+        "only the macOS and Linux applications exist so far")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ruby186.cmake")
+
 if(APPLE)
     enable_language(OBJC)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ruby186.cmake")
-
     add_executable(opensoup MACOSX_BUNDLE
         src/app_assets.c
         src/opensoup.c
@@ -94,52 +101,63 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )
     install(TARGETS opensoup BUNDLE DESTINATION ".")
+endif()
 
-    # headless framework-boot check (no window; run from the repo root)
-    add_executable(opensoup_rubyboot
-        src/rubyboot_main.c
-        src/assets.c
-        src/rubyhost.c
-        src/rubyhost_engine.c
-        src/rubyhost_limb.c
-        src/rubyhost_node.c
-        src/rubyhost_realize.c
-        src/rubyhost_sound.c
-        src/toybox_button.c
-        src/toybox_scroll.c
-        src/physics.c
-        src/toyfile.c
-        src/toyfile_fs.c
-        src/toydefs.c
-        src/audio.c
-        vendor/cjson/cJSON.c
-    )
-    target_include_directories(opensoup_rubyboot PRIVATE
-        "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}" src)
+# headless framework-boot check (no window; run from the repo root)
+add_executable(opensoup_rubyboot
+    src/rubyboot_main.c
+    src/assets.c
+    src/rubyhost.c
+    src/rubyhost_engine.c
+    src/rubyhost_limb.c
+    src/rubyhost_node.c
+    src/rubyhost_realize.c
+    src/rubyhost_sound.c
+    src/toybox_button.c
+    src/toybox_scroll.c
+    src/physics.c
+    src/toyfile.c
+    src/toyfile_fs.c
+    src/toydefs.c
+    src/audio.c
+    vendor/cjson/cJSON.c
+)
+target_include_directories(opensoup_rubyboot PRIVATE
+    "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}" src)
+target_link_libraries(opensoup_rubyboot PRIVATE Ruby186::Embed)
+target_compile_options(opensoup_rubyboot PRIVATE -Wall -Wextra)
+
+if(APPLE)
     target_link_libraries(opensoup_rubyboot PRIVATE
-        Ruby186::Embed
         "-framework AudioToolbox"
         "-framework CoreAudio"
     )
-    target_compile_options(opensoup_rubyboot PRIVATE -Wall -Wextra)
-else()
-    message(FATAL_ERROR "only the macOS application exists so far")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Threads REQUIRED)
+    target_link_libraries(opensoup_rubyboot PRIVATE
+        Threads::Threads
+        "${CMAKE_DL_LIBS}"
+        m
+    )
 endif()
 
-set(OPENSOUP_PACKAGE_ARCH "${CMAKE_OSX_ARCHITECTURES}")
-if(NOT OPENSOUP_PACKAGE_ARCH)
-    set(OPENSOUP_PACKAGE_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
-endif()
+if(APPLE)
+    set(OPENSOUP_PACKAGE_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+    if(NOT OPENSOUP_PACKAGE_ARCH)
+        set(OPENSOUP_PACKAGE_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
 
-set(CPACK_GENERATOR "DragNDrop")
-set(CPACK_PACKAGE_NAME "OpenSoup")
-set(CPACK_PACKAGE_VENDOR "OpenSoup")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "An open-source remake of Souptoys Toybox")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-set(CPACK_PACKAGE_FILE_NAME
-    "OpenSoup-${PROJECT_VERSION}-macOS-${OPENSOUP_PACKAGE_ARCH}")
-set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/package")
-set(CPACK_DMG_VOLUME_NAME "OpenSoup ${PROJECT_VERSION}")
-set(CPACK_DMG_FORMAT "UDZO")
-set(CPACK_DMG_DISABLE_APPLICATIONS_SYMLINK OFF)
-include(CPack)
+    set(CPACK_GENERATOR "DragNDrop")
+    set(CPACK_PACKAGE_NAME "OpenSoup")
+    set(CPACK_PACKAGE_VENDOR "OpenSoup")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "An open-source remake of Souptoys Toybox")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_FILE_NAME
+        "OpenSoup-${PROJECT_VERSION}-macOS-${OPENSOUP_PACKAGE_ARCH}")
+    set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/package")
+    set(CPACK_DMG_VOLUME_NAME "OpenSoup ${PROJECT_VERSION}")
+    set(CPACK_DMG_FORMAT "UDZO")
+    set(CPACK_DMG_DISABLE_APPLICATIONS_SYMLINK OFF)
+    include(CPack)
+endif()

@@ -216,6 +216,8 @@ static void build_license_properties(void) {
             case TOYPROP_FLOAT:
                 value = rb_float_new(p->number);
                 break;
+            default:
+                continue;
         }
         rb_hash_aset(g_license_properties, rb_str_new2(p->key), value);
     }
@@ -342,9 +344,20 @@ static const char* BOOTSTRAP =
     "end;";
 
 bool rbh_boot(const char* assets_root) {
-    snprintf(g_assets, sizeof g_assets, "%s", assets_root);
-    container_resource_root(g_root, sizeof g_root, assets_root,
-                            "souptoys_core_toy");
+    if (!assets_root) {
+        fprintf(stderr, "[rubyhost] assets root is missing\n");
+        return false;
+    }
+    const int assets_len = snprintf(g_assets, sizeof g_assets, "%s",
+                                    assets_root);
+    const int root_len = container_resource_root(g_root, sizeof g_root,
+                                                 assets_root,
+                                                 "souptoys_core_toy");
+    if (assets_len < 0 || (size_t)assets_len >= sizeof g_assets
+        || root_len < 0 || (size_t)root_len >= sizeof g_root) {
+        fprintf(stderr, "[rubyhost] assets root is too long\n");
+        return false;
+    }
 
     ruby_init();
     ruby_script("souptoys_embedded");

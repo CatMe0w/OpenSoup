@@ -26,8 +26,11 @@ static bool sound_resolve_path(VALUE self, char* out, size_t cap) {
         return false;
     }
     char res[1024];
-    container_resource_root(res, sizeof res, g_assets,
-                            sn_get(toyv)->def->root);
+    const int res_len = container_resource_root(res, sizeof res, g_assets,
+                                                sn_get(toyv)->def->root);
+    if (res_len < 0 || (size_t)res_len >= sizeof res) {
+        return false;
+    }
 
     // Def locations were relative to the container's synthetic defs/ dir,
     // which sat parallel to the VFS root: ../sound/... maps directly to

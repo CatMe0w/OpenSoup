@@ -240,7 +240,13 @@ int main(int argc, char** argv) {
             ok = false;
             break;
         }
-        snprintf(path, sizeof path, "%s/%s0000.tga", assets, header);
+        const int path_len = snprintf(path, sizeof path, "%s/%s0000.tga",
+                                      assets, header);
+        if (path_len < 0 || (size_t)path_len >= sizeof path) {
+            fprintf(stderr, "rubyboot: Toybox pack sprite path too long\n");
+            ok = false;
+            break;
+        }
         as_image image = {0};
         ok = ok && as_load_tga(path, &image);
         as_image_free(&image);
