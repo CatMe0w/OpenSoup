@@ -439,6 +439,7 @@ fail:
 
 bool nsis_decode_containers(const char* installer_path, unsigned types,
                             nsis_container_consumer consumer,
+                            void* context,
                             char* error_text, size_t error_size) {
     error_context error = {error_text, error_size};
     if (error.text && error.size) {
@@ -494,7 +495,8 @@ bool nsis_decode_containers(const char* installer_path, unsigned types,
         free(decoded);
         return false;
     }
-    const bool ok = consumer(containers, count, error_text, error_size);
+    const bool ok = consumer(context, containers, count,
+                             error_text, error_size);
     free(containers);
     free(decoded);
     return ok;

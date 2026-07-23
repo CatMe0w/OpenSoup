@@ -1,6 +1,7 @@
 #pragma once
 
 #include "toyfile.h"
+#include <stdbool.h>
 
 // Extracts one container's resource VFS below `directory`.
 toyfile_status toyfile_extract_resources(const toyfile* file,
@@ -23,4 +24,5 @@ typedef struct {
 toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
                                            size_t count,
                                            const char* assets_root,
+                                           bool* assets_root_created,
                                            char* error, size_t error_size);

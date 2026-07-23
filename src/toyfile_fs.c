@@ -233,34 +233,6 @@ static char* container_name_from_path(const char* path, fs_context* fs,
     return name;
 }
 
-static bool regular_file(const char* path) {
-    struct stat info;
-    return lstat(path, &info) == 0 && S_ISREG(info.st_mode);
-}
-
-static bool validate_assets_root(const char* root, fs_context* fs) {
-    static const char* required[] = {
-        "souptoys_core_toy/manifest.json",
-        "souptoys_core_toy/defs/world.json",
-        "souptoys_core_toy/resources/souptoys.rb",
-    };
-    for (size_t i = 0; i < sizeof required / sizeof required[0]; i++) {
-        char* path = child_path(root, required[i], fs);
-        if (!path) {
-            return false;
-        }
-        const bool present = regular_file(path);
-        if (!present) {
-            fs_error(fs, "installed assets are missing %s", required[i]);
-        }
-        free(path);
-        if (!present) {
-            return false;
-        }
-    }
-    return true;
-}
-
 toyfile_status toyfile_extract_resources(const toyfile* file,
                                          const char* directory,
                                          char* error, size_t error_size) {
@@ -431,8 +403,12 @@ toyfile_status toyfile_extract_container(const toyfile* file,
 toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
                                            size_t count,
                                            const char* assets_root,
+                                           bool* assets_root_created,
                                            char* error, size_t error_size) {
     fs_context fs = {error, error_size};
+    if (assets_root_created) {
+        *assets_root_created = false;
+    }
     if (fs.error && fs.error_size) {
         error[0] = 0;
     }
@@ -498,6 +474,8 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
             fs_error(&fs, "cannot create assets root %s: %s", target,
                      strerror(errno));
             status = TOYFILE_IO_ERROR;
+        } else if (assets_root_created) {
+            *assets_root_created = true;
         }
     }
 
@@ -520,9 +498,6 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         }
         free(output);
         toyfile_close(file);
-    }
-    if (status == TOYFILE_OK && !validate_assets_root(target, &fs)) {
-        status = TOYFILE_INVALID_FORMAT;
     }
     free(parent);
     for (size_t i = 0; i < count; i++) {

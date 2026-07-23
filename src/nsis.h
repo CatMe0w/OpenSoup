@@ -18,10 +18,12 @@ typedef struct {
 
 // Container names and bytes are borrowed from the decoded installer and stay
 // valid only during the synchronous consumer call.
-typedef bool (*nsis_container_consumer)(const nsis_container* containers,
+typedef bool (*nsis_container_consumer)(void* context,
+                                        const nsis_container* containers,
                                         size_t count,
                                         char* error, size_t error_size);
 
 bool nsis_decode_containers(const char* installer_path, unsigned types,
                             nsis_container_consumer consumer,
+                            void* context,
                             char* error, size_t error_size);

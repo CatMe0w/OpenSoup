@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 
+#include "app_assets.h"
 #include "app_paths.h"
 #include "opensoup.h"
 #include "scene.h"
@@ -64,19 +65,22 @@ static void show_quit_alert(NSString* message, NSString* information) {
     }
 }
 
-static void show_missing_asset_alert(app_assets_state state) {
-    NSString* name = nil;
-    if (state == APP_ASSETS_CORE_MISSING) {
-        name = @"souptoys_core_toy/resources";
-    } else {
-        return;
-    }
-
+static void show_missing_asset_alert(void) {
     NSString* root = [NSString stringWithUTF8String:assets_root];
-    NSString* missing = [root stringByAppendingPathComponent:name];
-    show_quit_alert(@"Required game asset not found",
+    show_quit_alert(@"Game assets not found",
         [NSString stringWithFormat:
-            @"OpenSoup could not find the required asset at:\n\n%@", missing]);
+            @"OpenSoup could not find game assets at:\n\n%@", root]);
+}
+
+static NSString* rollback_failed_asset_install(void) {
+    NSError* error = nil;
+    NSURL* root = [NSURL fileURLWithFileSystemRepresentation:assets_root
+                                                isDirectory:YES
+                                              relativeToURL:nil];
+    if ([[NSFileManager defaultManager] removeItemAtURL:root error:&error]) {
+        return nil;
+    }
+    return error.localizedDescription ?: @"unknown error";
 }
 
 static bool show_installer_picker(void) {
@@ -99,13 +103,22 @@ static bool show_installer_picker(void) {
 
     const char* path = panel.URL.fileSystemRepresentation;
     char error[1024] = {0};
-    if (path
-        && app_assets_install_from_installer(path, error, sizeof error)) {
+    const app_assets_install_status status =
+        app_assets_install_from_installer(
+            path, assets_root, error, sizeof error);
+    if (status == APP_ASSETS_INSTALL_OK) {
         return true;
     }
     NSString* information = error[0]
         ? [NSString stringWithUTF8String:error]
         : @"OpenSoup could not extract the selected installer.";
+    if (status == APP_ASSETS_INSTALL_FAILED_PARTIAL) {
+        NSString* rollback_error = rollback_failed_asset_install();
+        if (rollback_error) {
+            information = [NSString stringWithFormat:
+                @"%@\n\nRollback failed: %@", information, rollback_error];
+        }
+    }
     show_quit_alert(@"Game asset installation failed", information);
     return false;
 }
@@ -330,23 +343,23 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0); // keep diagnostics visible when piped
-    assets_root = app_assets_root();
+    assets_root = macos_assets_root();
     if (!assets_root) {
         fprintf(stderr, "cannot resolve the assets path\n");
         return 1;
     }
-    app_assets_state state = app_assets_get_state();
-    if (state == APP_ASSETS_DIRECTORY_MISSING) {
+    app_assets_state state = app_assets_get_state(assets_root);
+    if (state == APP_ASSETS_MISSING) {
         @autoreleasepool {
             if (!show_installer_picker()) {
                 return 1;
             }
         }
-        state = app_assets_get_state();
+        state = app_assets_get_state(assets_root);
     }
     if (state != APP_ASSETS_READY) {
         @autoreleasepool {
-            show_missing_asset_alert(state);
+            show_missing_asset_alert();
         }
         return 1;
     }
