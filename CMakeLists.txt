@@ -110,6 +110,29 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
     target_include_directories(opensoup PRIVATE src)
     target_compile_options(opensoup PRIVATE -Wall -Wextra)
+elseif(WIN32 AND MINGW)
+    enable_language(CXX) # for the DirectComposition glue, see composition.cpp
+    enable_language(RC)  # for the manifest, which declares DPI awareness
+    add_executable(opensoup
+        src/windows/main.c
+        src/windows/composition.cpp
+        src/windows/scene_demo.c
+        src/windows/sokol_impl.c
+        src/windows/opensoup.rc
+    )
+    target_include_directories(opensoup PRIVATE "${SOKOL_DIR}" src)
+    # DirectComposition needs Windows 8, the waitable swapchain needs 8.1
+    target_compile_definitions(opensoup PRIVATE
+        WINVER=0x0603
+        _WIN32_WINNT=0x0603
+    )
+    target_compile_options(opensoup PRIVATE -Wall -Wextra)
+    set_source_files_properties(src/windows/composition.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-exceptions;-fno-rtti"
+    )
+    # composition.cpp uses no C++ library, so stay free of GCC runtime DLLs
+    target_link_options(opensoup PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(opensoup PRIVATE d3d11 dxgi dcomp dxguid shcore)
 endif()
 
 # headless framework-boot check (no window; run from the repo root)
