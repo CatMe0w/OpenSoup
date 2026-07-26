@@ -19,11 +19,15 @@
 #import <Foundation/Foundation.h>
 #elif defined(__linux__)
 #include <ftw.h>
+#elif defined(__MINGW32__)
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
 #else
 #error Unsupported platform
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__MINGW32__)
 static char* append_path(const char* base, const char* relative) {
     size_t base_len = strlen(base);
     while (base_len > 1 && base[base_len - 1] == '/') {
@@ -103,6 +107,21 @@ const char* platform_assets_path(void) {
     }
     assets_path = append_path(home,
         ".local/share/cat.me0w.opensoup/assets");
+    return assets_path;
+}
+#elif defined(__MINGW32__)
+const char* platform_assets_path(void) {
+    static char* assets_path;
+    if (assets_path) {
+        return assets_path;
+    }
+
+    const char* local_app_data = getenv("LOCALAPPDATA");
+    if (!local_app_data || !local_app_data[0]) {
+        return NULL;
+    }
+    assets_path = append_path(
+        local_app_data, "cat.me0w.opensoup/assets");
     return assets_path;
 }
 #endif
@@ -204,7 +223,12 @@ platform_directory_state platform_get_directory_state(const char* path) {
 
 platform_path_kind platform_get_path_kind(const char* path, bool follow_links) {
     struct stat info;
+#if defined(__MINGW32__)
+    (void)follow_links;
+    const int status = stat(path, &info);
+#else
     const int status = follow_links ? stat(path, &info) : lstat(path, &info);
+#endif
     if (status != 0) {
         return errno == ENOENT ? PLATFORM_PATH_MISSING : PLATFORM_PATH_ERROR;
     }
@@ -213,13 +237,18 @@ platform_path_kind platform_get_path_kind(const char* path, bool follow_links) {
 }
 
 int platform_create_directory(const char* path) {
+#if defined(__MINGW32__)
+    return mkdir(path);
+#else
     return mkdir(path, 0777);
+#endif
 }
 
 int platform_remove_empty_directory(const char* path) {
     return rmdir(path);
 }
 
+#if defined(__APPLE__) || defined(__linux__)
 static bool valid_remove_tree_root(const char* path) {
     if (!path || path[0] != '/') {
         return false;
@@ -248,6 +277,7 @@ static bool valid_remove_tree_root(const char* path) {
     }
     return has_component;
 }
+#endif
 
 #if defined(__APPLE__)
 bool platform_remove_tree(const char* path) {

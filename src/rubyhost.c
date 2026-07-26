@@ -436,7 +436,11 @@ static const char* abs_dir(const char* dir, char* buf) {
     if (!dir) {
         return ".";
     }
+#ifdef _WIN32
+    return _fullpath(buf, dir, 1024) ? buf : dir;
+#else
     return realpath(dir, buf) ? buf : dir;
+#endif
 }
 
 bool rbh_load_toy_class(const char* class_name, const char* class_dir) {

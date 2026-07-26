@@ -34,9 +34,10 @@ set_source_files_properties(src/audio.c PROPERTIES
     COMPILE_OPTIONS "-Wno-tautological-compare"
 )
 
-if(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR
-        "only the macOS and Linux applications exist so far")
+if(NOT APPLE
+   AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND NOT (WIN32 AND MINGW))
+    message(FATAL_ERROR "Unsupported platform")
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ruby186.cmake")

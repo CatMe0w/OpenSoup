@@ -31,6 +31,20 @@ if(APPLE)
             "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
     endif()
 endif()
+if(MINGW)
+    find_program(RUBY186_SHELL NAMES sh REQUIRED)
+    find_program(RUBY186_AS NAMES as REQUIRED)
+    find_program(RUBY186_NM NAMES nm REQUIRED)
+    find_program(RUBY186_WINDRES NAMES windres REQUIRED)
+    find_program(RUBY186_DLLWRAP NAMES dllwrap REQUIRED)
+    find_program(RUBY186_OBJDUMP NAMES objdump REQUIRED)
+    find_program(RUBY186_GREP NAMES grep REQUIRED)
+    list(APPEND RUBY186_CONFIGURE_PLATFORM_ARGS
+        --build=i686-w64-mingw32
+        --host=i686-w64-mingw32
+        --with-winsock2
+    )
+endif()
 
 if(APPLE)
     # Do not rely on a Homebrew gmake that may not exist.
@@ -75,12 +89,73 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         "${RUBY186_CRYPT_LIBRARY}"
         m
     )
+elseif(MINGW)
+    list(APPEND RUBY186_SYSTEM_LIBRARIES ws2_32 m)
 endif()
 
 set(RUBY186_EXTINIT "${RUBY186_BINARY_DIR}/ext/extinit.o")
 set(RUBY186_STRINGIO "${RUBY186_BINARY_DIR}/ext/stringio/stringio.a")
 set(RUBY186_SYCK "${RUBY186_BINARY_DIR}/ext/syck/syck.a")
-set(RUBY186_LIBRARY "${RUBY186_BINARY_DIR}/libruby-static.a")
+if(MINGW)
+    set(RUBY186_LIBRARY
+        "${RUBY186_BINARY_DIR}/libmsvcrt-ruby18-static.a")
+else()
+    set(RUBY186_LIBRARY "${RUBY186_BINARY_DIR}/libruby-static.a")
+endif()
+
+set(RUBY186_CONFIGURE_COMMAND "<SOURCE_DIR>/configure")
+if(MINGW)
+    set(RUBY186_CONFIGURE_COMMAND
+        "${RUBY186_SHELL}" "<SOURCE_DIR>/configure")
+endif()
+
+set(RUBY186_CONFIGURE_ENVIRONMENT
+    "CC=${CMAKE_C_COMPILER}"
+    "AR=${CMAKE_AR}"
+    "RANLIB=${CMAKE_RANLIB}"
+    "CFLAGS=${RUBY186_CFLAGS}"
+    "LDFLAGS=${RUBY186_LDFLAGS}"
+)
+if(MINGW)
+    # Busybox sh on Windows cannot reliably infer these from PATH, and
+    # these ABI definitions must be visible before any MinGW system header.
+    list(APPEND RUBY186_CONFIGURE_ENVIRONMENT
+        "PATH_SEPARATOR=$<SEMICOLON>"
+        "AS=${RUBY186_AS}"
+        "NM=${RUBY186_NM}"
+        "WINDRES=${RUBY186_WINDRES}"
+        "DLLWRAP=${RUBY186_DLLWRAP}"
+        "OBJDUMP=${RUBY186_OBJDUMP}"
+        "GREP=${RUBY186_GREP}"
+        "EGREP=${RUBY186_GREP} -E"
+        "CPPFLAGS=-D_FILE_OFFSET_BITS=64 -D_TIMEZONE_DEFINED"
+    )
+endif()
+
+set(RUBY186_BUILD_COMMAND
+    "${RUBY186_MAKE_PROGRAM}" "-j${RUBY186_BUILD_JOBS}"
+)
+if(MINGW)
+    # Ruby 1.8's MinGW GNUmakefile uses dllwrap even for a static build.
+    # Build the core in parallel, then integrate only the required static
+    # extensions serially to avoid its extinit.o link race.
+    set(RUBY186_BUILD_COMMAND
+        "${CMAKE_COMMAND}" -E touch_nocreate "<SOURCE_DIR>/parse.c"
+        COMMAND
+        "${RUBY186_MAKE_PROGRAM}" "-j${RUBY186_BUILD_JOBS}"
+        "RUBY_EXP="
+        "LIBRUBY=libmsvcrt-ruby18-static.a"
+        "LIBRUBYARG=-lmsvcrt-ruby18-static"
+        miniruby.exe .rbconfig.time
+        COMMAND
+        "${RUBY186_MAKE_PROGRAM}" -j1
+        "RUBY_EXP="
+        "LIBRUBY=libmsvcrt-ruby18-static.a"
+        "LIBRUBYARG=-lmsvcrt-ruby18-static"
+        "EXTSTATIC=stringio,syck"
+        "EXTS=stringio,syck"
+    )
+endif()
 
 ExternalProject_Add(ruby186_build
     SOURCE_DIR "${RUBY186_SOURCE_DIR}"
@@ -90,17 +165,12 @@ ExternalProject_Add(ruby186_build
     PATCH_COMMAND ""
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "CC=${CMAKE_C_COMPILER}"
-        "AR=${CMAKE_AR}"
-        "RANLIB=${CMAKE_RANLIB}"
-        "CFLAGS=${RUBY186_CFLAGS}"
-        "LDFLAGS=${RUBY186_LDFLAGS}"
-        "<SOURCE_DIR>/configure"
+        ${RUBY186_CONFIGURE_ENVIRONMENT}
+        ${RUBY186_CONFIGURE_COMMAND}
         "--srcdir=<SOURCE_DIR>"
         --disable-shared
         ${RUBY186_CONFIGURE_PLATFORM_ARGS}
-    BUILD_COMMAND
-        "${RUBY186_MAKE_PROGRAM}" "-j${RUBY186_BUILD_JOBS}"
+    BUILD_COMMAND ${RUBY186_BUILD_COMMAND}
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS
         "${RUBY186_BINARY_DIR}/config.h"
@@ -117,6 +187,16 @@ target_include_directories(opensoup_ruby186 INTERFACE
     "${RUBY186_SOURCE_DIR}"
     "${RUBY186_BINARY_DIR}"
 )
+# Ruby 1.8 uses empty parameter lists for ANYARGS, in C23 those mean (void)
+target_compile_options(opensoup_ruby186 INTERFACE
+    "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-std=gnu17>"
+)
+if(MINGW)
+    target_compile_definitions(opensoup_ruby186 INTERFACE
+        _FILE_OFFSET_BITS=64
+        _TIMEZONE_DEFINED
+    )
+endif()
 target_link_libraries(opensoup_ruby186 INTERFACE
     "${RUBY186_EXTINIT}"
     "${RUBY186_STRINGIO}"
