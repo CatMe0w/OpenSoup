@@ -67,7 +67,7 @@ if(APPLE)
         vendor/cjson/cJSON.c
         vendor/lzma/LzmaDec.c
         src/macos/app_paths.m
-        src/macos/main_macos.m
+        src/macos/main.m
         src/macos/sokol_impl.m
     )
     target_include_directories(opensoup PRIVATE
@@ -75,7 +75,7 @@ if(APPLE)
         "${LZMA_DIR}" src)
     set_source_files_properties(
         src/macos/app_paths.m
-        src/macos/main_macos.m
+        src/macos/main.m
         PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc"
     )
@@ -101,6 +101,12 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )
     install(TARGETS opensoup BUNDLE DESTINATION ".")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(opensoup
+        src/linux/app_paths.c
+        src/linux/main.c
+    )
+    target_compile_options(opensoup PRIVATE -Wall -Wextra)
 endif()
 
 # headless framework-boot check (no window; run from the repo root)
