@@ -1,10 +1,10 @@
-#include "app_paths.h"
+#include "platform.h"
 
 #include <stdio.h>
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0); // keep diagnostics visible when piped
-    const char* assets_root = linux_assets_root();
+    const char* assets_root = platform_assets_path();
     if (!assets_root) {
         fprintf(stderr, "cannot resolve the assets path\n");
         return 1;

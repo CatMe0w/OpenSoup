@@ -45,6 +45,7 @@ if(APPLE)
     enable_language(OBJC)
     add_executable(opensoup MACOSX_BUNDLE
         src/app_assets.c
+        src/platform.c
         src/opensoup.c
         src/scene.c
         src/assets.c
@@ -66,7 +67,6 @@ if(APPLE)
         src/rubyhost_sound.c
         vendor/cjson/cJSON.c
         vendor/lzma/LzmaDec.c
-        src/macos/app_paths.m
         src/macos/main.m
         src/macos/sokol_impl.m
     )
@@ -74,9 +74,10 @@ if(APPLE)
         "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}"
         "${LZMA_DIR}" src)
     set_source_files_properties(
-        src/macos/app_paths.m
+        src/platform.c
         src/macos/main.m
         PROPERTIES
+        LANGUAGE OBJC
         COMPILE_OPTIONS "-fobjc-arc"
     )
     set_source_files_properties(src/rubyhost.c PROPERTIES
@@ -103,15 +104,17 @@ if(APPLE)
     install(TARGETS opensoup BUNDLE DESTINATION ".")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(opensoup
-        src/linux/app_paths.c
+        src/platform.c
         src/linux/main.c
     )
+    target_include_directories(opensoup PRIVATE src)
     target_compile_options(opensoup PRIVATE -Wall -Wextra)
 endif()
 
 # headless framework-boot check (no window; run from the repo root)
 add_executable(opensoup_rubyboot
     src/rubyboot_main.c
+    src/platform.c
     src/assets.c
     src/rubyhost.c
     src/rubyhost_engine.c
@@ -135,6 +138,7 @@ target_compile_options(opensoup_rubyboot PRIVATE -Wall -Wextra)
 
 if(APPLE)
     target_link_libraries(opensoup_rubyboot PRIVATE
+        "-framework Foundation"
         "-framework AudioToolbox"
         "-framework CoreAudio"
     )

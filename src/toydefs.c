@@ -1,7 +1,7 @@
 #include "toydefs.h"
 #include "physics.h"
+#include "platform.h"
 #include "cJSON.h"
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -397,32 +397,34 @@ static void load_container(const char* assets_root, const char* container) {
     load_manifest(assets_root, container);
     char dir[1024];
     snprintf(dir, sizeof dir, "%s/%s/defs", assets_root, container);
-    struct dirent** entries = NULL;
-    const int n = scandir(dir, &entries, NULL, alphasort);
-    for (int i = 0; i < n; i++) {
-        if (has_suffix(entries[i]->d_name, ".json")) {
+    platform_directory_list entries;
+    if (!platform_directory_list_sorted(dir, &entries)) {
+        return;
+    }
+    for (size_t i = 0; i < entries.count; i++) {
+        if (has_suffix(entries.names[i], ".json")) {
             char path[1400];
-            snprintf(path, sizeof path, "%s/%s", dir, entries[i]->d_name);
+            snprintf(path, sizeof path, "%s/%s", dir, entries.names[i]);
             load_toy_file(path, container);
         }
-        free(entries[i]);
     }
-    free(entries);
+    platform_directory_list_free(&entries);
 }
 
 bool toydefs_load(const char* assets_root) {
     if (ndefs > 0) {
         return true; // already loaded by the application bootstrap
     }
-    struct dirent** entries = NULL;
-    const int n = scandir(assets_root, &entries, NULL, alphasort);
-    for (int i = 0; i < n; i++) {
-        if (entries[i]->d_name[0] != '.') {
-            load_container(assets_root, entries[i]->d_name);
-        }
-        free(entries[i]);
+    platform_directory_list entries;
+    if (!platform_directory_list_sorted(assets_root, &entries)) {
+        return false;
     }
-    free(entries);
+    for (size_t i = 0; i < entries.count; i++) {
+        if (entries.names[i][0] != '.') {
+            load_container(assets_root, entries.names[i]);
+        }
+    }
+    platform_directory_list_free(&entries);
     return ndefs > 0;
 }
 

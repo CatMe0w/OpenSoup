@@ -1,20 +1,14 @@
 #include "toyfile_fs.h"
 
 #include "cJSON.h"
+#include "platform.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#ifndef O_NOFOLLOW
-#define O_NOFOLLOW 0
-#endif
 
 typedef struct {
     char* error;
@@ -33,13 +27,12 @@ static void fs_error(fs_context* fs, const char* fmt, ...) {
 
 static bool make_directory(const char* path, bool trusted_root,
                            fs_context* fs) {
-    if (mkdir(path, 0777) == 0) {
+    if (platform_create_directory(path) == 0) {
         return true;
     }
     if (errno == EEXIST) {
-        struct stat info;
-        const int status = trusted_root ? stat(path, &info) : lstat(path, &info);
-        if (status == 0 && S_ISDIR(info.st_mode)) {
+        if (platform_get_path_kind(path, trusted_root)
+            == PLATFORM_PATH_DIRECTORY) {
             return true;
         }
     }
@@ -121,27 +114,17 @@ static bool make_parent_directories(char* path, size_t root_length,
 
 static bool write_resource(const char* path, const void* data, size_t size,
                            fs_context* fs) {
-    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0666);
-    if (fd < 0) {
+    const platform_write_result result =
+        platform_write_file(path, data, size);
+    if (result == PLATFORM_WRITE_OPEN_FAILED) {
         fs_error(fs, "cannot open %s: %s", path, strerror(errno));
         return false;
     }
-    const unsigned char* bytes = data;
-    size_t written = 0;
-    while (written < size) {
-        const ssize_t n = write(fd, bytes + written, size - written);
-        if (n > 0) {
-            written += (size_t)n;
-        } else if (n < 0 && errno == EINTR) {
-            continue;
-        } else {
-            const int write_error = errno;
-            close(fd);
-            fs_error(fs, "cannot write %s: %s", path, strerror(write_error));
-            return false;
-        }
+    if (result == PLATFORM_WRITE_FAILED) {
+        fs_error(fs, "cannot write %s: %s", path, strerror(errno));
+        return false;
     }
-    if (close(fd) != 0) {
+    if (result == PLATFORM_WRITE_CLOSE_FAILED) {
         fs_error(fs, "cannot close %s: %s", path, strerror(errno));
         return false;
     }
@@ -470,7 +453,7 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         status = TOYFILE_IO_ERROR;
     }
     if (status == TOYFILE_OK) {
-        if (mkdir(target, 0777) != 0) {
+        if (platform_create_directory(target) != 0) {
             fs_error(&fs, "cannot create assets root %s: %s", target,
                      strerror(errno));
             status = TOYFILE_IO_ERROR;

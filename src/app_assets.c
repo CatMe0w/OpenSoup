@@ -1,45 +1,20 @@
 #include "app_assets.h"
 
 #include "nsis.h"
+#include "platform.h"
 #include "toyfile_fs.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-typedef enum {
-    DIRECTORY_UNREADABLE = -1,
-    DIRECTORY_EMPTY,
-    DIRECTORY_NONEMPTY,
-} directory_state;
-
-static directory_state get_directory_state(const char* path) {
-    DIR* directory = opendir(path);
-    if (!directory) {
-        return DIRECTORY_UNREADABLE;
-    }
-    directory_state state = DIRECTORY_EMPTY;
-    struct dirent* entry;
-    while ((entry = readdir(directory))) {
-        if (strcmp(entry->d_name, ".") != 0
-            && strcmp(entry->d_name, "..") != 0) {
-            state = DIRECTORY_NONEMPTY;
-            break;
-        }
-    }
-    closedir(directory);
-    return state;
-}
 
 app_assets_state app_assets_get_state(const char* assets_root) {
-    struct stat info;
-    if (!assets_root || stat(assets_root, &info) != 0
-        || !S_ISDIR(info.st_mode)
-        || get_directory_state(assets_root) != DIRECTORY_NONEMPTY) {
+    if (!assets_root
+        || platform_get_path_kind(assets_root, true)
+            != PLATFORM_PATH_DIRECTORY
+        || platform_get_directory_state(assets_root)
+            != PLATFORM_DIRECTORY_NONEMPTY) {
         return APP_ASSETS_MISSING;
     }
     return APP_ASSETS_READY;
@@ -55,17 +30,18 @@ static bool install_assets_from_decoded_toys(
         char* error, size_t error_size) {
     install_context* install = context;
     const char* root = install->assets_root;
-    struct stat info;
-    if (lstat(root, &info) == 0) {
-        if (!S_ISDIR(info.st_mode)
-            || get_directory_state(root) != DIRECTORY_EMPTY) {
+    const platform_path_kind kind = platform_get_path_kind(root, false);
+    if (kind != PLATFORM_PATH_MISSING && kind != PLATFORM_PATH_ERROR) {
+        if (kind != PLATFORM_PATH_DIRECTORY
+            || platform_get_directory_state(root)
+                != PLATFORM_DIRECTORY_EMPTY) {
             if (error && error_size) {
                 snprintf(error, error_size,
                          "assets root is not an empty directory: %s", root);
             }
             return false;
         }
-        if (rmdir(root) != 0) {
+        if (platform_remove_empty_directory(root) != 0) {
             if (error && error_size) {
                 snprintf(error, error_size,
                          "cannot remove empty assets root %s: %s",
@@ -73,7 +49,7 @@ static bool install_assets_from_decoded_toys(
             }
             return false;
         }
-    } else if (errno != ENOENT) {
+    } else if (kind == PLATFORM_PATH_ERROR) {
         if (error && error_size) {
             snprintf(error, error_size, "cannot inspect assets root %s: %s",
                      root, strerror(errno));

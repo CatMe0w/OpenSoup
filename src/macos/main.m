@@ -9,8 +9,8 @@
 #import <MetalKit/MetalKit.h>
 
 #include "app_assets.h"
-#include "app_paths.h"
 #include "opensoup.h"
+#include "platform.h"
 #include "scene.h"
 
 static NSWindow* window;
@@ -72,17 +72,6 @@ static void show_missing_asset_alert(void) {
             @"OpenSoup could not find game assets at:\n\n%@", root]);
 }
 
-static NSString* rollback_failed_asset_install(void) {
-    NSError* error = nil;
-    NSURL* root = [NSURL fileURLWithFileSystemRepresentation:assets_root
-                                                isDirectory:YES
-                                              relativeToURL:nil];
-    if ([[NSFileManager defaultManager] removeItemAtURL:root error:&error]) {
-        return nil;
-    }
-    return error.localizedDescription ?: @"unknown error";
-}
-
 static bool show_installer_picker(void) {
     prepare_modal_ui();
     NSOpenPanel* panel = [NSOpenPanel openPanel];
@@ -112,12 +101,12 @@ static bool show_installer_picker(void) {
     NSString* information = error[0]
         ? [NSString stringWithUTF8String:error]
         : @"OpenSoup could not extract the selected installer.";
-    if (status == APP_ASSETS_INSTALL_FAILED_PARTIAL) {
-        NSString* rollback_error = rollback_failed_asset_install();
-        if (rollback_error) {
-            information = [NSString stringWithFormat:
-                @"%@\n\nRollback failed: %@", information, rollback_error];
-        }
+    if (status == APP_ASSETS_INSTALL_FAILED_PARTIAL
+        && !platform_remove_tree(assets_root)) {
+        NSString* root = [NSString stringWithUTF8String:assets_root];
+        information = [NSString stringWithFormat:
+            @"%@\n\nRollback failed. Partial assets remain at:\n\n%@",
+            information, root];
     }
     show_quit_alert(@"Game asset installation failed", information);
     return false;
@@ -343,7 +332,7 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0); // keep diagnostics visible when piped
-    assets_root = macos_assets_root();
+    assets_root = platform_assets_path();
     if (!assets_root) {
         fprintf(stderr, "cannot resolve the assets path\n");
         return 1;
