@@ -73,6 +73,7 @@ if(APPLE)
     target_include_directories(opensoup PRIVATE
         "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}"
         "${LZMA_DIR}" src)
+    target_compile_definitions(opensoup PRIVATE SOKOL_METAL)
     set_source_files_properties(src/macos/main.m PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc"
     )
@@ -120,6 +121,7 @@ elseif(WIN32 AND MINGW)
     target_compile_definitions(opensoup PRIVATE
         WINVER=0x0603
         _WIN32_WINNT=0x0603
+        SOKOL_D3D11
     )
     target_compile_options(opensoup PRIVATE -Wall -Wextra)
     set_source_files_properties(src/windows/composition.cpp PROPERTIES

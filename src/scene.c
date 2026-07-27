@@ -172,6 +172,80 @@ static void body_to_sprite(sprite_t* s, float view_h) {
     s->y = view_h - wy * PHYS_PX_PER_UNIT - oy - (float)s->h / 2.0f;
 }
 
+#if defined(SOKOL_D3D11)
+static const char* const vs_source =
+    "cbuffer params : register(b0) {\n"
+    "  float2 quad_pos;\n"
+    "  float2 quad_size;\n"
+    "  float2 viewport;\n"
+    "  float2 uv_scale;\n"
+    "  float4 tint;\n"
+    "};\n"
+    "struct vs_out {\n"
+    "  float4 pos : SV_Position;\n"
+    "  float2 uv : TEXCOORD0;\n"
+    "  float4 tint : TEXCOORD1;\n"
+    "};\n"
+    "vs_out main(float2 corner : TEXCOORD0) {\n"
+    "  vs_out o;\n"
+    "  float2 px = quad_pos + corner * quad_size;\n"
+    "  o.pos = float4(2.0 * px.x / viewport.x - 1.0,\n"
+    "                 1.0 - 2.0 * px.y / viewport.y, 0.5, 1.0);\n"
+    "  o.uv = corner * uv_scale;\n"
+    "  o.tint = tint;\n"
+    "  return o;\n"
+    "}\n";
+static const char* const fs_source =
+    "Texture2D<float4> tex : register(t0);\n"
+    "SamplerState smp : register(s0);\n"
+    "struct fs_in {\n"
+    "  float4 pos : SV_Position;\n"
+    "  float2 uv : TEXCOORD0;\n"
+    "  float4 tint : TEXCOORD1;\n"
+    "};\n"
+    "float4 main(fs_in inp) : SV_Target0 {\n"
+    "  return tex.Sample(smp, inp.uv) * inp.tint;\n"
+    "}\n";
+#elif defined(SOKOL_METAL)
+static const char* const vs_source =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct params_t {\n"
+    "  float2 pos;\n"
+    "  float2 size;\n"
+    "  float2 viewport;\n"
+    "  float2 uv_scale;\n"
+    "  float4 tint;\n"
+    "};\n"
+    "struct vs_in {\n"
+    "  float2 corner [[attribute(0)]];\n"
+    "};\n"
+    "struct vs_out {\n"
+    "  float4 pos [[position]];\n"
+    "  float2 uv;\n"
+    "  float4 tint;\n"
+    "};\n"
+    "vertex vs_out _main(vs_in in [[stage_in]], constant params_t& params [[buffer(0)]]) {\n"
+    "  vs_out out;\n"
+    "  float2 px = params.pos + in.corner * params.size;\n"
+    "  out.pos = float4(2.0 * px.x / params.viewport.x - 1.0,\n"
+    "                   1.0 - 2.0 * px.y / params.viewport.y, 0.5, 1.0);\n"
+    "  out.uv = in.corner * params.uv_scale;\n"
+    "  out.tint = params.tint;\n"
+    "  return out;\n"
+    "}\n";
+static const char* const fs_source =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct fs_in { float2 uv; float4 tint; };\n"
+    "fragment float4 _main(fs_in in [[stage_in]],\n"
+    "  texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]]) {\n"
+    "  return tex.sample(smp, in.uv) * in.tint;\n"
+    "}\n";
+#else
+#error "no sprite shader for this sokol backend"
+#endif
+
 void scene_setup(const sg_environment* env) {
     sg_setup(&(sg_desc){
         .environment = *env,
@@ -197,49 +271,26 @@ void scene_setup(const sg_environment* env) {
     });
 
     sg_shader shd = sg_make_shader(&(sg_shader_desc){
+        .attrs[0] = { .hlsl_sem_name = "TEXCOORD", .hlsl_sem_index = 0 },
         .uniform_blocks[0] = {
             .stage = SG_SHADERSTAGE_VERTEX,
             .size = sizeof(vs_params_t),
             .msl_buffer_n = 0,
+            .hlsl_register_b_n = 0,
         },
-        .views[0].texture = { .stage = SG_SHADERSTAGE_FRAGMENT, .msl_texture_n = 0 },
-        .samplers[0] = { .stage = SG_SHADERSTAGE_FRAGMENT, .msl_sampler_n = 0 },
+        .views[0].texture = {
+            .stage = SG_SHADERSTAGE_FRAGMENT,
+            .msl_texture_n = 0,
+            .hlsl_register_t_n = 0,
+        },
+        .samplers[0] = {
+            .stage = SG_SHADERSTAGE_FRAGMENT,
+            .msl_sampler_n = 0,
+            .hlsl_register_s_n = 0,
+        },
         .texture_sampler_pairs[0] = { .stage = SG_SHADERSTAGE_FRAGMENT, .view_slot = 0, .sampler_slot = 0 },
-        .vertex_func.source =
-            "#include <metal_stdlib>\n"
-            "using namespace metal;\n"
-            "struct params_t {\n"
-            "  float2 pos;\n"
-            "  float2 size;\n"
-            "  float2 viewport;\n"
-            "  float2 uv_scale;\n"
-            "  float4 tint;\n"
-            "};\n"
-            "struct vs_in {\n"
-            "  float2 corner [[attribute(0)]];\n"
-            "};\n"
-            "struct vs_out {\n"
-            "  float4 pos [[position]];\n"
-            "  float2 uv;\n"
-            "  float4 tint;\n"
-            "};\n"
-            "vertex vs_out _main(vs_in in [[stage_in]], constant params_t& params [[buffer(0)]]) {\n"
-            "  vs_out out;\n"
-            "  float2 px = params.pos + in.corner * params.size;\n"
-            "  out.pos = float4(2.0 * px.x / params.viewport.x - 1.0,\n"
-            "                   1.0 - 2.0 * px.y / params.viewport.y, 0.5, 1.0);\n"
-            "  out.uv = in.corner * params.uv_scale;\n"
-            "  out.tint = params.tint;\n"
-            "  return out;\n"
-            "}\n",
-        .fragment_func.source =
-            "#include <metal_stdlib>\n"
-            "using namespace metal;\n"
-            "struct fs_in { float2 uv; float4 tint; };\n"
-            "fragment float4 _main(fs_in in [[stage_in]],\n"
-            "  texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]]) {\n"
-            "  return tex.sample(smp, in.uv) * in.tint;\n"
-            "}\n",
+        .vertex_func.source = vs_source,
+        .fragment_func.source = fs_source,
     });
 
     state.pip = sg_make_pipeline(&(sg_pipeline_desc){
