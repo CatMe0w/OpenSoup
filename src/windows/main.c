@@ -3,15 +3,20 @@
 
 #include <windows.h>
 
+#include <commdlg.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
+#include <shellapi.h>
 #include <shellscalingapi.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <windowsx.h>
 
+#include "app_assets.h"
 #include "composition.h"
-#include "scene_demo.h"
+#include "opensoup.h"
+#include "scene.h"
 
 static const wchar_t* const window_class_name = L"OpenSoupScene";
 static const wchar_t* const app_name = L"OpenSoup";
@@ -26,6 +31,12 @@ static int backbuffer_width;
 static int backbuffer_height;
 static float dpi_scale = 1.0f;
 static bool running = true;
+static bool started; // the app is up, so resizes are worth reporting
+static bool dragging;
+static POINT last_mouse; // physical client px, for a synthesized release
+static LARGE_INTEGER qpc_frequency;
+static LARGE_INTEGER last_frame_counter;
+static char opensoup_folder[MAX_PATH]; // native separators, for the shell
 
 static void fail(const char* what, HRESULT hr) {
     char message[512];
@@ -55,6 +66,61 @@ static void require_win32(bool ok, const char* what) {
             (object) = NULL;                            \
         }                                               \
     } while (0)
+
+static void remember_opensoup_folder(const char* assets_root) {
+    snprintf(opensoup_folder, sizeof opensoup_folder, "%s", assets_root);
+    char* last = strrchr(opensoup_folder, '/');
+    if (last) {
+        *last = 0;
+    }
+    for (char* p = opensoup_folder; *p; p++) {
+        if (*p == '/') {
+            *p = '\\';
+        }
+    }
+}
+
+static void open_opensoup_folder(void) {
+    ShellExecuteA(NULL, "open", opensoup_folder, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void show_quit_alert(const char* message, const char* information) {
+    char body[1536];
+    snprintf(body, sizeof body, "%s\n\n%s\n\nOpen the OpenSoup folder?",
+             message, information);
+    fprintf(stderr, "%s: %s\n", message, information);
+    if (MessageBoxA(NULL, body, "OpenSoup",
+                    MB_ICONWARNING | MB_YESNO | MB_SETFOREGROUND) == IDYES) {
+        open_opensoup_folder();
+    }
+}
+
+static bool show_installer_picker(const char* assets_root) {
+    char path[MAX_PATH] = {0};
+    OPENFILENAMEA picker = {
+        .lStructSize = sizeof(OPENFILENAMEA),
+        .lpstrFilter = "Souptoys installer (*.exe)\0*.exe\0"
+                       "All files (*.*)\0*.*\0",
+        .lpstrFile = path,
+        .nMaxFile = sizeof path,
+        .lpstrTitle = "Select the original Souptoys installer (.exe) to set "
+                      "up OpenSoup's game assets",
+        // OFN_NOCHANGEDIR: browsing would otherwise move the process's own
+        // working directory to wherever the user ended up
+        .Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+    };
+    if (!GetOpenFileNameA(&picker)) {
+        return false;
+    }
+
+    char error[1024] = {0};
+    if (app_assets_install_from_installer(path, assets_root, error,
+                                          sizeof error)) {
+        return true;
+    }
+    show_quit_alert("Game asset installation failed", error);
+    return false;
+}
 
 // the scene speaks logical pixels; backing pixels belong to the swapchain
 static float logical_width(void) {
@@ -107,6 +173,14 @@ static void apply_scene_bounds(void) {
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// A DPI change moves the logical size even when the physical one holds still,
+// so the view size is reported from here rather than from WM_SIZE alone.
+static void report_view_size(void) {
+    if (started) {
+        opensoup_resize(logical_width(), logical_height());
+    }
+}
+
 static void create_render_view(void) {
     ID3D11Texture2D* backbuffer = NULL;
     require(IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
@@ -138,24 +212,52 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam,
     switch (message) {
     case WM_LBUTTONDOWN:
         SetCapture(hwnd); // Win32 has no implicit drag capture
-        scene_demo_grab_begin(to_logical(GET_X_LPARAM(lparam)),
-                              to_logical(GET_Y_LPARAM(lparam)));
+        dragging = true;
+        last_mouse.x = GET_X_LPARAM(lparam);
+        last_mouse.y = GET_Y_LPARAM(lparam);
+        opensoup_mouse_down(to_logical(last_mouse.x),
+                            to_logical(last_mouse.y));
         return 0;
     case WM_MOUSEMOVE:
-        scene_demo_grab_move(to_logical(GET_X_LPARAM(lparam)),
-                             to_logical(GET_Y_LPARAM(lparam)));
+        last_mouse.x = GET_X_LPARAM(lparam);
+        last_mouse.y = GET_Y_LPARAM(lparam);
+        // hover is driven by the per-frame cursor poll, so only a real drag
+        // reaches the app from here
+        if (dragging) {
+            opensoup_mouse_drag(to_logical(last_mouse.x),
+                                to_logical(last_mouse.y));
+        }
         return 0;
     case WM_LBUTTONUP:
-        scene_demo_grab_move(to_logical(GET_X_LPARAM(lparam)),
-                             to_logical(GET_Y_LPARAM(lparam)));
+        last_mouse.x = GET_X_LPARAM(lparam);
+        last_mouse.y = GET_Y_LPARAM(lparam);
+        dragging = false; // ReleaseCapture re-enters as WM_CAPTURECHANGED
+        opensoup_mouse_up(to_logical(last_mouse.x), to_logical(last_mouse.y));
         if (GetCapture() == hwnd) {
             ReleaseCapture();
         }
-        scene_demo_grab_end();
         return 0;
     case WM_CAPTURECHANGED:
-        scene_demo_grab_end();
+        // Capture can be taken away mid-drag, and the app has no cancel entry
+        // point, so release where the pointer last was or the Ruby-side grab
+        // never lets go.
+        if (dragging) {
+            dragging = false;
+            opensoup_mouse_up(to_logical(last_mouse.x),
+                              to_logical(last_mouse.y));
+        }
         return 0;
+    case WM_MOUSEWHEEL: {
+        // unlike the button messages, this one carries SCREEN coordinates
+        POINT p = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        if (ScreenToClient(hwnd, &p)) {
+            opensoup_scroll(to_logical(p.x), to_logical(p.y),
+                            (float)GET_WHEEL_DELTA_WPARAM(wparam)
+                                / (float)WHEEL_DELTA,
+                            false);
+        }
+        return 0;
+    }
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
             running = false;
@@ -167,10 +269,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam,
         return 0;
     case WM_SIZE:
         resize_swapchain(LOWORD(lparam), HIWORD(lparam));
+        report_view_size();
         return 0;
     case WM_DPICHANGED:
         dpi_scale = (float)LOWORD(wparam) / (float)USER_DEFAULT_SCREEN_DPI;
         apply_scene_bounds();
+        report_view_size();
         return 0;
     case WM_DISPLAYCHANGE:
         apply_scene_bounds();
@@ -295,18 +399,34 @@ static void destroy_graphics(void) {
     release_com(d3d_device);
 }
 
+static double elapsed_ms(void) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const LONGLONG previous = last_frame_counter.QuadPart;
+    last_frame_counter = now;
+    if (previous == 0) {
+        return 0.0;
+    }
+    return (double)(now.QuadPart - previous) * 1000.0
+         / (double)qpc_frequency.QuadPart;
+}
+
 static void render_frame(void) {
     if (!render_view || backbuffer_width <= 0 || backbuffer_height <= 0) {
         return;
     }
+    const double dt_ms = elapsed_ms();
 
-    // per-shape click-through, never toggled mid-grab
-    if (!scene_demo_grabbing()) {
-        POINT cursor;
-        if (GetCursorPos(&cursor) && ScreenToClient(window, &cursor)) {
-            set_mouse_transparent(!scene_demo_hit_test(to_logical(cursor.x),
-                                                       to_logical(cursor.y)));
-        }
+    POINT cursor;
+    const bool cursor_valid = GetCursorPos(&cursor)
+                           && ScreenToClient(window, &cursor);
+    const opensoup_frame_result r = opensoup_frame(
+        dt_ms, cursor_valid ? to_logical(cursor.x) : 0.0f,
+        cursor_valid ? to_logical(cursor.y) : 0.0f, cursor_valid);
+    set_mouse_transparent(!r.wants_mouse);
+    if (r.quit) {
+        running = false;
+        return;
     }
 
     const sg_swapchain sokol_swapchain = {
@@ -317,7 +437,7 @@ static void render_frame(void) {
         .depth_format = SG_PIXELFORMAT_NONE,
         .d3d11 = { .render_view = render_view },
     };
-    scene_demo_frame(&sokol_swapchain, logical_width(), logical_height());
+    scene_frame(&sokol_swapchain, logical_width(), logical_height(), dt_ms);
 
     require(IDXGISwapChain1_Present(swapchain, 1, 0),
             "cannot present the swapchain");
@@ -337,6 +457,35 @@ static void pump_messages(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); // msvcrt has no line buffering
+    QueryPerformanceFrequency(&qpc_frequency);
+
+    const char* assets_root = app_assets_path();
+    if (!assets_root) {
+        fail("cannot resolve the assets path", E_FAIL);
+    }
+    remember_opensoup_folder(assets_root);
+
+    app_assets_state assets = app_assets_get_state(assets_root);
+    if (assets == APP_ASSETS_MISSING) {
+        if (!show_installer_picker(assets_root)) {
+            return 1;
+        }
+        assets = app_assets_get_state(assets_root);
+    }
+    if (assets != APP_ASSETS_READY) {
+        char message[512];
+        snprintf(message, sizeof message,
+                 "OpenSoup could not find game assets at:\n\n%s", assets_root);
+        show_quit_alert("Game assets not found", message);
+        return 1;
+    }
+    // see opensoup_boot for the Ruby 1.8 stack-base rule
+    if (!opensoup_boot(assets_root)) {
+        show_quit_alert("Ruby framework failed to start",
+                        "OpenSoup could not load the Souptoys Ruby framework. "
+                        "Check the Ruby scripts in the OpenSoup folder.");
+        return 1;
+    }
 
     create_window();
     create_graphics();
@@ -352,12 +501,15 @@ int main(void) {
             .device_context = d3d_context,
         },
     };
-    scene_demo_setup(&environment, logical_width(), logical_height());
+    scene_setup(&environment);
+
+    // World extents and original 1x assets use logical pixels; the backbuffer
+    // size is physical and belongs to the swapchain alone.
+    opensoup_start(logical_width(), logical_height());
+    started = true;
 
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
-    puts("OpenSoup Windows host up: drag the triangle, empty space clicks "
-         "through, Esc quits");
 
     while (running) {
         const DWORD wait = MsgWaitForMultipleObjectsEx(
@@ -372,7 +524,7 @@ int main(void) {
         }
     }
 
-    scene_demo_shutdown();
+    opensoup_shutdown();
     destroy_graphics();
     if (window) {
         DestroyWindow(window);

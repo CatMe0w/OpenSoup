@@ -110,13 +110,36 @@ elseif(WIN32 AND MINGW)
     enable_language(CXX) # for the DirectComposition glue, see composition.cpp
     enable_language(RC)  # for the manifest, which declares DPI awareness
     add_executable(opensoup
+        src/app_assets.c
+        src/opensoup.c
+        src/scene.c
+        src/assets.c
+        src/sprite_hook.c
+        src/toybox.c
+        src/toybox_button.c
+        src/toybox_scroll.c
+        src/physics.c
+        src/toyfile.c
+        src/toyfile_fs.c
+        src/nsis.c
+        src/toydefs.c
+        src/audio.c
+        src/rubyhost.c
+        src/rubyhost_engine.c
+        src/rubyhost_limb.c
+        src/rubyhost_node.c
+        src/rubyhost_realize.c
+        src/rubyhost_sound.c
+        vendor/cjson/cJSON.c
+        vendor/lzma/LzmaDec.c
         src/windows/main.c
         src/windows/composition.cpp
-        src/windows/scene_demo.c
         src/windows/sokol_impl.c
         src/windows/opensoup.rc
     )
-    target_include_directories(opensoup PRIVATE "${SOKOL_DIR}" src)
+    target_include_directories(opensoup PRIVATE
+        "${SOKOL_DIR}" "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}"
+        "${LZMA_DIR}" src)
     # DirectComposition needs Windows 8, the waitable swapchain needs 8.1
     target_compile_definitions(opensoup PRIVATE
         WINVER=0x0603
@@ -127,9 +150,14 @@ elseif(WIN32 AND MINGW)
     set_source_files_properties(src/windows/composition.cpp PROPERTIES
         COMPILE_OPTIONS "-fno-exceptions;-fno-rtti"
     )
-    # composition.cpp uses no C++ library, so stay free of GCC runtime DLLs
-    target_link_options(opensoup PRIVATE -static-libgcc -static-libstdc++)
-    target_link_libraries(opensoup PRIVATE d3d11 dxgi dcomp dxguid shcore)
+    target_link_options(opensoup PRIVATE
+        # composition.cpp uses no C++ library, so stay free of GCC runtime DLLs
+        -static-libgcc -static-libstdc++
+        # a PE defaults to a 1 MB stack, too little for the Ruby interpreter
+        -Wl,--stack,8388608
+    )
+    target_link_libraries(opensoup PRIVATE
+        Ruby186::Embed d3d11 dxgi dcomp dxguid shcore comdlg32 ole32 shell32)
 endif()
 
 # headless framework-boot check (no window; run from the repo root)
