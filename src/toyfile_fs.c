@@ -1,22 +1,50 @@
 #include "toyfile_fs.h"
 
 #include "cJSON.h"
-#include "platform.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifndef O_BINARY
+#define O_BINARY 0 // POSIX has no text mode to defeat
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0 // the Windows CRT has no symbolic link to refuse
+#endif
+
+// Length of an absolute path's root prefix: 1 for "/", 3 for "C:/", and 0
+// when the path is not absolute. Paths only ever reach OpenSoup with '/'
+// separators, so a backslash root is deliberately not recognised.
+static size_t root_prefix(const char* path) {
+    if (!path) {
+        return 0;
+    }
+#if defined(__MINGW32__)
+    const char drive = path[0];
+    const bool letter = (drive >= 'A' && drive <= 'Z')
+                     || (drive >= 'a' && drive <= 'z');
+    return letter && path[1] == ':' && path[2] == '/' ? 3 : 0;
+#else
+    return path[0] == '/' ? 1 : 0;
+#endif
+}
 
 typedef struct {
     char* error;
     size_t error_size;
 } fs_context;
 
+// fs is optional: the tree walk below reuses these helpers with no reporting
 static void fs_error(fs_context* fs, const char* fmt, ...) {
-    if (!fs->error || fs->error_size == 0) {
+    if (!fs || !fs->error || fs->error_size == 0) {
         return;
     }
     va_list ap;
@@ -25,14 +53,36 @@ static void fs_error(fs_context* fs, const char* fmt, ...) {
     va_end(ap);
 }
 
+toyfile_path_kind toyfile_path_stat(const char* path, bool follow_links) {
+    struct stat info;
+#if defined(__MINGW32__)
+    (void)follow_links;
+    const int status = stat(path, &info);
+#else
+    const int status = follow_links ? stat(path, &info) : lstat(path, &info);
+#endif
+    if (status != 0) {
+        return errno == ENOENT ? TOYFILE_PATH_MISSING : TOYFILE_PATH_ERROR;
+    }
+    return S_ISDIR(info.st_mode) ? TOYFILE_PATH_DIRECTORY
+                                 : TOYFILE_PATH_OTHER;
+}
+
+static int create_directory(const char* path) {
+#if defined(__MINGW32__)
+    return mkdir(path); // the Windows CRT takes no mode
+#else
+    return mkdir(path, 0777);
+#endif
+}
+
 static bool make_directory(const char* path, bool trusted_root,
                            fs_context* fs) {
-    if (platform_create_directory(path) == 0) {
+    if (create_directory(path) == 0) {
         return true;
     }
     if (errno == EEXIST) {
-        if (platform_get_path_kind(path, trusted_root)
-            == PLATFORM_PATH_DIRECTORY) {
+        if (toyfile_path_stat(path, trusted_root) == TOYFILE_PATH_DIRECTORY) {
             return true;
         }
     }
@@ -46,7 +96,10 @@ static bool make_directory_tree(const char* path, fs_context* fs) {
         fs_error(fs, "out of memory creating %s", path);
         return false;
     }
-    for (char* p = copy + 1; *p; p++) {
+    // The root itself ("/", "C:/") is never a directory anyone can create,
+    // and on Windows "C:" is not even a path stat() understands.
+    const size_t root = root_prefix(path);
+    for (char* p = copy + (root ? root : 1); *p; p++) {
         if (*p != '/') {
             continue;
         }
@@ -112,19 +165,56 @@ static bool make_parent_directories(char* path, size_t root_length,
     return true;
 }
 
+typedef enum {
+    WRITE_OK,
+    WRITE_OPEN_FAILED,
+    WRITE_FAILED,
+    WRITE_CLOSE_FAILED,
+} write_result;
+
+// Replaces a regular file without following a symbolic link at the final path
+// component. On failure, errno describes the failed operation.
+static write_result write_file(const char* path, const void* data,
+                               size_t size) {
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY
+                            | O_NOFOLLOW, 0666);
+    if (fd < 0) {
+        return WRITE_OPEN_FAILED;
+    }
+
+    const unsigned char* bytes = data;
+    size_t written = 0;
+    while (written < size) {
+        const ssize_t count = write(fd, bytes + written, size - written);
+        if (count > 0) {
+            written += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            const int error = errno;
+            close(fd);
+            errno = error;
+            return WRITE_FAILED;
+        }
+    }
+    if (close(fd) != 0) {
+        return WRITE_CLOSE_FAILED;
+    }
+    return WRITE_OK;
+}
+
 static bool write_resource(const char* path, const void* data, size_t size,
                            fs_context* fs) {
-    const platform_write_result result =
-        platform_write_file(path, data, size);
-    if (result == PLATFORM_WRITE_OPEN_FAILED) {
+    const write_result result = write_file(path, data, size);
+    if (result == WRITE_OPEN_FAILED) {
         fs_error(fs, "cannot open %s: %s", path, strerror(errno));
         return false;
     }
-    if (result == PLATFORM_WRITE_FAILED) {
+    if (result == WRITE_FAILED) {
         fs_error(fs, "cannot write %s: %s", path, strerror(errno));
         return false;
     }
-    if (result == PLATFORM_WRITE_CLOSE_FAILED) {
+    if (result == WRITE_CLOSE_FAILED) {
         fs_error(fs, "cannot close %s: %s", path, strerror(errno));
         return false;
     }
@@ -147,6 +237,78 @@ static char* child_path(const char* directory, const char* child,
     path[root_size] = '/';
     memcpy(path + root_size + 1, child, child_size + 1);
     return path;
+}
+
+// Rejects anything the recursion below has no business descending into: a
+// relative path, a filesystem root, or a path with a "." or ".." component.
+static bool safe_remove_root(const char* path) {
+    const size_t root = root_prefix(path);
+    if (root == 0) {
+        return false;
+    }
+
+    bool has_component = false;
+    const char* cursor = path + root;
+    while (*cursor) {
+        while (*cursor == '/') {
+            cursor++;
+        }
+        const char* component = cursor;
+        while (*cursor && *cursor != '/') {
+            cursor++;
+        }
+        const size_t size = (size_t)(cursor - component);
+        if (size == 0) {
+            continue;
+        }
+        if ((size == 1 && component[0] == '.')
+            || (size == 2 && component[0] == '.'
+                          && component[1] == '.')) {
+            return false;
+        }
+        has_component = true;
+    }
+    return has_component;
+}
+
+static bool remove_entry(const char* path);
+
+static bool remove_directory_contents(const char* path) {
+    DIR* directory = opendir(path);
+    if (!directory) {
+        return false;
+    }
+
+    bool ok = true;
+    const struct dirent* entry;
+    while ((entry = readdir(directory))) {
+        if (strcmp(entry->d_name, ".") == 0
+            || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        char* child = child_path(path, entry->d_name, NULL);
+        if (!child) {
+            ok = false;
+            break;
+        }
+        ok = remove_entry(child) && ok;
+        free(child);
+    }
+    closedir(directory);
+    return ok;
+}
+
+static bool remove_entry(const char* path) {
+    // Only a real directory is descended into: a symbolic link to one is
+    // classified as OTHER and unlinked whole.
+    if (toyfile_path_stat(path, false) == TOYFILE_PATH_DIRECTORY) {
+        return remove_directory_contents(path) && rmdir(path) == 0;
+    }
+    return remove(path) == 0;
+}
+
+bool toyfile_remove_tree(const char* path) {
+    return safe_remove_root(path) && remove_entry(path);
 }
 
 static bool safe_def_id(const char* id) {
@@ -395,7 +557,8 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
     if (fs.error && fs.error_size) {
         error[0] = 0;
     }
-    if (!inputs || count == 0 || !assets_root || assets_root[0] != '/') {
+    const size_t root = root_prefix(assets_root);
+    if (!inputs || count == 0 || root == 0) {
         fs_error(&fs, "missing inputs or absolute assets root");
         return TOYFILE_INVALID_ARGUMENT;
     }
@@ -406,11 +569,11 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         return TOYFILE_OUT_OF_MEMORY;
     }
     size_t target_size = strlen(target);
-    while (target_size > 1 && target[target_size - 1] == '/') {
+    while (target_size > root && target[target_size - 1] == '/') {
         target[--target_size] = 0;
     }
     char* separator = strrchr(target, '/');
-    if (target_size <= 1 || !separator || !separator[1]) {
+    if (target_size <= root || !separator || !separator[1]) {
         fs_error(&fs, "unsafe assets root %s", assets_root);
         free(target);
         return TOYFILE_INVALID_ARGUMENT;
@@ -439,8 +602,10 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         }
     }
 
-    const size_t parent_size = separator == target
-                             ? 1 : (size_t)(separator - target);
+    // "/assets" and "C:/assets" have their separator inside the root, and
+    // the parent is then the root itself
+    const size_t separator_at = (size_t)(separator - target);
+    const size_t parent_size = separator_at < root ? root : separator_at;
     char* parent = malloc(parent_size + 1);
     if (!parent) {
         fs_error(&fs, "out of memory preparing assets parent");
@@ -453,7 +618,7 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         status = TOYFILE_IO_ERROR;
     }
     if (status == TOYFILE_OK) {
-        if (platform_create_directory(target) != 0) {
+        if (create_directory(target) != 0) {
             fs_error(&fs, "cannot create assets root %s: %s", target,
                      strerror(errno));
             status = TOYFILE_IO_ERROR;

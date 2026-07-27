@@ -10,7 +10,6 @@
 
 #include "app_assets.h"
 #include "opensoup.h"
-#include "platform.h"
 #include "scene.h"
 
 static NSWindow* window;
@@ -102,7 +101,7 @@ static bool show_installer_picker(void) {
         ? [NSString stringWithUTF8String:error]
         : @"OpenSoup could not extract the selected installer.";
     if (status == APP_ASSETS_INSTALL_FAILED_PARTIAL
-        && !platform_remove_tree(assets_root)) {
+        && !app_assets_remove_partial(assets_root)) {
         NSString* root = [NSString stringWithUTF8String:assets_root];
         information = [NSString stringWithFormat:
             @"%@\n\nRollback failed. Partial assets remain at:\n\n%@",
@@ -332,7 +331,7 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0); // keep diagnostics visible when piped
-    assets_root = platform_assets_path();
+    assets_root = app_assets_path();
     if (!assets_root) {
         fprintf(stderr, "cannot resolve the assets path\n");
         return 1;

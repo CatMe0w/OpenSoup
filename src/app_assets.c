@@ -1,23 +1,155 @@
 #include "app_assets.h"
 
 #include "nsis.h"
-#include "platform.h"
 #include "toyfile_fs.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(__MINGW32__)
+#error Unsupported platform
+#endif
+
+static char* append_path(const char* base, const char* relative) {
+    size_t base_len = strlen(base);
+    while (base_len > 1 && base[base_len - 1] == '/') {
+        base_len--;
+    }
+
+    const size_t relative_len = strlen(relative);
+    const size_t separator_len = base[base_len - 1] == '/' ? 0 : 1;
+    if (base_len > SIZE_MAX - separator_len - relative_len - 1) {
+        return NULL;
+    }
+
+    char* path = malloc(base_len + separator_len + relative_len + 1);
+    if (!path) {
+        return NULL;
+    }
+
+    memcpy(path, base, base_len);
+    size_t offset = base_len;
+    if (separator_len) {
+        path[offset++] = '/';
+    }
+    memcpy(path + offset, relative, relative_len + 1);
+    return path;
+}
+
+#if defined(__APPLE__)
+// NSApplicationSupportDirectory resolves to exactly this for an unsandboxed
+// process, and a sandbox would rewrite HOME to the container anyway - so this
+// stays free of Foundation, and of Objective-C.
+const char* app_assets_path(void) {
+    static char* assets_path;
+    if (assets_path) {
+        return assets_path;
+    }
+
+    const char* home = getenv("HOME");
+    if (!home || home[0] != '/') {
+        return NULL;
+    }
+    assets_path = append_path(home,
+        "Library/Application Support/cat.me0w.opensoup/assets");
+    return assets_path;
+}
+#elif defined(__linux__)
+const char* app_assets_path(void) {
+    static char* assets_path;
+    if (assets_path) {
+        return assets_path;
+    }
+
+    const char* data_home = getenv("XDG_DATA_HOME");
+    if (data_home && data_home[0] == '/') {
+        assets_path = append_path(data_home, "cat.me0w.opensoup/assets");
+        return assets_path;
+    }
+
+    const char* home = getenv("HOME");
+    if (!home || home[0] != '/') {
+        return NULL;
+    }
+    assets_path = append_path(home,
+        ".local/share/cat.me0w.opensoup/assets");
+    return assets_path;
+}
+#elif defined(__MINGW32__)
+const char* app_assets_path(void) {
+    static char* assets_path;
+    if (assets_path) {
+        return assets_path;
+    }
+
+    const char* local_app_data = getenv("LOCALAPPDATA");
+    if (!local_app_data || !local_app_data[0]) {
+        return NULL;
+    }
+    // %LOCALAPPDATA% arrives with backslashes. Every path OpenSoup handles is
+    // split on '/' alone, so normalize once, here.
+    char* base = strdup(local_app_data);
+    if (!base) {
+        return NULL;
+    }
+    for (char* p = base; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    const char drive = base[0];
+    const bool absolute = ((drive >= 'A' && drive <= 'Z')
+                        || (drive >= 'a' && drive <= 'z'))
+                       && base[1] == ':' && base[2] == '/';
+    if (absolute) {
+        assets_path = append_path(base, "cat.me0w.opensoup/assets");
+    }
+    free(base);
+    return assets_path;
+}
+#endif
+
+typedef enum {
+    DIRECTORY_UNREADABLE = -1,
+    DIRECTORY_EMPTY,
+    DIRECTORY_NONEMPTY,
+} directory_state;
+
+static directory_state get_directory_state(const char* path) {
+    DIR* directory = opendir(path);
+    if (!directory) {
+        return DIRECTORY_UNREADABLE;
+    }
+
+    directory_state state = DIRECTORY_EMPTY;
+    const struct dirent* entry;
+    while ((entry = readdir(directory))) {
+        if (strcmp(entry->d_name, ".") != 0
+            && strcmp(entry->d_name, "..") != 0) {
+            state = DIRECTORY_NONEMPTY;
+            break;
+        }
+    }
+    closedir(directory);
+    return state;
+}
 
 app_assets_state app_assets_get_state(const char* assets_root) {
     if (!assets_root
-        || platform_get_path_kind(assets_root, true)
-            != PLATFORM_PATH_DIRECTORY
-        || platform_get_directory_state(assets_root)
-            != PLATFORM_DIRECTORY_NONEMPTY) {
+        || toyfile_path_stat(assets_root, true) != TOYFILE_PATH_DIRECTORY
+        || get_directory_state(assets_root) != DIRECTORY_NONEMPTY) {
         return APP_ASSETS_MISSING;
     }
     return APP_ASSETS_READY;
+}
+
+bool app_assets_remove_partial(const char* assets_root) {
+    return toyfile_remove_tree(assets_root);
 }
 
 typedef struct {
@@ -30,18 +162,17 @@ static bool install_assets_from_decoded_toys(
         char* error, size_t error_size) {
     install_context* install = context;
     const char* root = install->assets_root;
-    const platform_path_kind kind = platform_get_path_kind(root, false);
-    if (kind != PLATFORM_PATH_MISSING && kind != PLATFORM_PATH_ERROR) {
-        if (kind != PLATFORM_PATH_DIRECTORY
-            || platform_get_directory_state(root)
-                != PLATFORM_DIRECTORY_EMPTY) {
+    const toyfile_path_kind kind = toyfile_path_stat(root, false);
+    if (kind != TOYFILE_PATH_MISSING && kind != TOYFILE_PATH_ERROR) {
+        if (kind != TOYFILE_PATH_DIRECTORY
+            || get_directory_state(root) != DIRECTORY_EMPTY) {
             if (error && error_size) {
                 snprintf(error, error_size,
                          "assets root is not an empty directory: %s", root);
             }
             return false;
         }
-        if (platform_remove_empty_directory(root) != 0) {
+        if (rmdir(root) != 0) {
             if (error && error_size) {
                 snprintf(error, error_size,
                          "cannot remove empty assets root %s: %s",
@@ -49,7 +180,7 @@ static bool install_assets_from_decoded_toys(
             }
             return false;
         }
-    } else if (kind == PLATFORM_PATH_ERROR) {
+    } else if (kind == TOYFILE_PATH_ERROR) {
         if (error && error_size) {
             snprintf(error, error_size, "cannot inspect assets root %s: %s",
                      root, strerror(errno));

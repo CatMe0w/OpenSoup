@@ -1,7 +1,9 @@
 #include "toydefs.h"
 #include "physics.h"
-#include "platform.h"
 #include "cJSON.h"
+#include <dirent.h>
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -387,6 +389,82 @@ static void load_toy_file(const char* path, const char* container) {
     cJSON_Delete(toy);
 }
 
+// Containers and defs load in locale-aware alphabetical order, so that a
+// catalog built from a directory does not depend on the filesystem's own
+// enumeration order.
+typedef struct {
+    char** names;
+    size_t count;
+} directory_list;
+
+static void directory_list_free(directory_list* list) {
+    for (size_t i = 0; i < list->count; i++) {
+        free(list->names[i]);
+    }
+    free(list->names);
+    *list = (directory_list){0};
+}
+
+static int compare_names(const void* lhs, const void* rhs) {
+    const char* const* a = lhs;
+    const char* const* b = rhs;
+    return strcoll(*a, *b);
+}
+
+static bool directory_list_sorted(const char* path, directory_list* result) {
+    *result = (directory_list){0};
+
+    DIR* directory = opendir(path);
+    if (!directory) {
+        return false;
+    }
+
+    size_t capacity = 0;
+    errno = 0;
+    const struct dirent* entry;
+    while ((entry = readdir(directory))) {
+        if (result->count == capacity) {
+            const size_t next_capacity = capacity ? capacity * 2 : 16;
+            if (next_capacity < capacity
+                || next_capacity > SIZE_MAX / sizeof(*result->names)) {
+                errno = ENOMEM;
+                break;
+            }
+            char** names = realloc(
+                result->names, next_capacity * sizeof(*result->names));
+            if (!names) {
+                errno = ENOMEM;
+                break;
+            }
+            result->names = names;
+            capacity = next_capacity;
+        }
+        result->names[result->count] = strdup(entry->d_name);
+        if (!result->names[result->count]) {
+            errno = ENOMEM;
+            break;
+        }
+        result->count++;
+        errno = 0;
+    }
+
+    int error = errno;
+    if (closedir(directory) != 0 && error == 0) {
+        error = errno;
+    }
+    if (error != 0) {
+        directory_list_free(result);
+        errno = error;
+        return false;
+    }
+
+    if (result->count > 1) {
+        qsort(result->names, result->count,
+              sizeof(*result->names), compare_names);
+    }
+    return true;
+}
+
 static bool has_suffix(const char* name, const char* suffix) {
     const size_t n = strlen(name);
     const size_t s = strlen(suffix);
@@ -397,8 +475,8 @@ static void load_container(const char* assets_root, const char* container) {
     load_manifest(assets_root, container);
     char dir[1024];
     snprintf(dir, sizeof dir, "%s/%s/defs", assets_root, container);
-    platform_directory_list entries;
-    if (!platform_directory_list_sorted(dir, &entries)) {
+    directory_list entries;
+    if (!directory_list_sorted(dir, &entries)) {
         return;
     }
     for (size_t i = 0; i < entries.count; i++) {
@@ -408,15 +486,15 @@ static void load_container(const char* assets_root, const char* container) {
             load_toy_file(path, container);
         }
     }
-    platform_directory_list_free(&entries);
+    directory_list_free(&entries);
 }
 
 bool toydefs_load(const char* assets_root) {
     if (ndefs > 0) {
         return true; // already loaded by the application bootstrap
     }
-    platform_directory_list entries;
-    if (!platform_directory_list_sorted(assets_root, &entries)) {
+    directory_list entries;
+    if (!directory_list_sorted(assets_root, &entries)) {
         return false;
     }
     for (size_t i = 0; i < entries.count; i++) {
@@ -424,7 +502,7 @@ bool toydefs_load(const char* assets_root) {
             load_container(assets_root, entries.names[i]);
         }
     }
-    platform_directory_list_free(&entries);
+    directory_list_free(&entries);
     return ndefs > 0;
 }
 

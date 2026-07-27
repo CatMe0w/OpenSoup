@@ -3,6 +3,21 @@
 #include "toyfile.h"
 #include <stdbool.h>
 
+typedef enum {
+    TOYFILE_PATH_ERROR = -1,
+    TOYFILE_PATH_MISSING,
+    TOYFILE_PATH_OTHER,
+    TOYFILE_PATH_DIRECTORY,
+} toyfile_path_kind;
+
+// Classifies a path. follow_links is honoured wherever the platform has
+// symbolic links; the Windows CRT has no lstat, so it always follows there.
+toyfile_path_kind toyfile_path_stat(const char* path, bool follow_links);
+
+// Recursively removes an absolute, non-root directory tree. Symbolic links
+// found as entries are removed rather than followed.
+bool toyfile_remove_tree(const char* path);
+
 // Extracts one container's resource VFS below `directory`.
 toyfile_status toyfile_extract_resources(const toyfile* file,
                                          const char* directory,
