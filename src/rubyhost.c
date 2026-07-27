@@ -387,11 +387,9 @@ bool rbh_boot(const char* assets_root) {
     rb_gv_set("$engine", rb_obj_alloc(cls_find("Souptoys")));
     build_license_properties();
 
-    char lp[sizeof g_root + 32];
-    snprintf(lp, sizeof lp, "$:.clear(); $: << '%s'", g_root);
-    if (!rbh_eval(lp, "load path reset")) {
-        return false;
-    }
+    VALUE load_path = rb_gv_get("$:");
+    rb_ary_clear(load_path);
+    rb_ary_push(load_path, rb_str_new2(g_root));
 
     int state = 0;
     rb_eval_string_protect("require 'matrix'", &state);
@@ -437,18 +435,35 @@ static const char* abs_dir(const char* dir, char* buf) {
         return ".";
     }
 #ifdef _WIN32
-    return _fullpath(buf, dir, 1024) ? buf : dir;
+    if (!_fullpath(buf, dir, 1024)) {
+        return dir;
+    }
+    // _fullpath always answers in backslashes; every other path in OpenSoup,
+    // and Pathname's own string arithmetic, is '/'-separated.
+    for (char* p = buf; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return buf;
 #else
     return realpath(dir, buf) ? buf : dir;
 #endif
 }
 
+// Bound as globals rather than interpolated into the eval'd source: a quote
+// anywhere in a path would end the Ruby literal early.
+static void bind_toy_class(const char* class_name, const char* class_dir) {
+    char abs[1024];
+    rb_gv_set("$opensoup_toy_class", rb_str_new2(class_name));
+    rb_gv_set("$opensoup_toy_dir", rb_str_new2(abs_dir(class_dir, abs)));
+}
+
 bool rbh_load_toy_class(const char* class_name, const char* class_dir) {
-    char abs[1024], code[2048];
-    snprintf(code, sizeof code,
-             "ToyClassResolver.load_toy_class('%s', Pathname.new('%s'))\n",
-             class_name, abs_dir(class_dir, abs));
-    return rbh_eval(code, class_name);
+    bind_toy_class(class_name, class_dir);
+    return rbh_eval("ToyClassResolver.load_toy_class($opensoup_toy_class,"
+                    " Pathname.new($opensoup_toy_dir))\n",
+                    class_name);
 }
 
 static int cmp_toypack(const void* a, const void* b) {
@@ -534,12 +549,14 @@ const char* rbh_toy_pack(const char* class_name) {
 
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,
                    double x_m, double y_m) {
-    char abs[1024], code[2048];
+    bind_toy_class(class_name, class_dir);
+    char code[512];
     snprintf(code, sizeof code,
-             "t = ToyClassResolver.load_toy_class('%s', Pathname.new('%s')).new\n"
+             "t = ToyClassResolver.load_toy_class($opensoup_toy_class,"
+             " Pathname.new($opensoup_toy_dir)).new\n"
              "t.move(Vector[%.6f, %.6f])\n"
              "$default_engine.toys << t\n",
-             class_name, abs_dir(class_dir, abs), x_m, y_m);
+             x_m, y_m);
     return rbh_eval(code, class_name);
 }
 
