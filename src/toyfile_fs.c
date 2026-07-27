@@ -20,6 +20,10 @@
 #define O_NOFOLLOW 0 // the Windows CRT has no symbolic link to refuse
 #endif
 
+// Sibling of the assets root that an install is built up in. Named so that a
+// leftover is obviously not an assets tree, to any reader and to the code.
+#define STAGING_SUFFIX ".incomplete"
+
 // Length of an absolute path's root prefix: 1 for "/", 3 for "C:/", and 0
 // when the path is not absolute. Paths only ever reach OpenSoup with '/'
 // separators, so a backslash root is deliberately not recognised.
@@ -311,6 +315,22 @@ bool toyfile_remove_tree(const char* path) {
     return safe_remove_root(path) && remove_entry(path);
 }
 
+static bool prepare_staging(const char* staging, fs_context* fs) {
+    toyfile_remove_tree(staging);
+    if (create_directory(staging) == 0) {
+        return true;
+    }
+    const int error = errno; // toyfile_path_stat is about to clobber it
+    if (toyfile_path_stat(staging, true) != TOYFILE_PATH_MISSING) {
+        fs_error(fs, "cannot remove the leftover staging directory %s; "
+                     "delete it and try again", staging);
+    } else {
+        fs_error(fs, "cannot create staging directory %s: %s", staging,
+                 strerror(error));
+    }
+    return false;
+}
+
 static bool safe_def_id(const char* id) {
     return id && id[0] && strcmp(id, ".") != 0 && strcmp(id, "..") != 0 &&
            !strchr(id, '/') && !strchr(id, '\\');
@@ -548,12 +568,8 @@ toyfile_status toyfile_extract_container(const toyfile* file,
 toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
                                            size_t count,
                                            const char* assets_root,
-                                           bool* assets_root_created,
                                            char* error, size_t error_size) {
     fs_context fs = {error, error_size};
-    if (assets_root_created) {
-        *assets_root_created = false;
-    }
     if (fs.error && fs.error_size) {
         error[0] = 0;
     }
@@ -614,17 +630,27 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         memcpy(parent, target, parent_size);
         parent[parent_size] = 0;
     }
+    // Everything lands in a sibling staging directory and is renamed into
+    // place only once the whole install has succeeded, so a failure can never
+    // leave a half-populated assets root behind. Debris keeps the staging
+    // name, which app_assets_get_state() does not recognise as assets.
+    char* staging = NULL;
+    if (status == TOYFILE_OK) {
+        staging = malloc(target_size + sizeof STAGING_SUFFIX);
+        if (!staging) {
+            fs_error(&fs, "out of memory preparing the staging directory");
+            status = TOYFILE_OUT_OF_MEMORY;
+        } else {
+            memcpy(staging, target, target_size);
+            memcpy(staging + target_size, STAGING_SUFFIX,
+                   sizeof STAGING_SUFFIX);
+        }
+    }
     if (status == TOYFILE_OK && !make_directory_tree(parent, &fs)) {
         status = TOYFILE_IO_ERROR;
     }
-    if (status == TOYFILE_OK) {
-        if (create_directory(target) != 0) {
-            fs_error(&fs, "cannot create assets root %s: %s", target,
-                     strerror(errno));
-            status = TOYFILE_IO_ERROR;
-        } else if (assets_root_created) {
-            *assets_root_created = true;
-        }
+    if (status == TOYFILE_OK && !prepare_staging(staging, &fs)) {
+        status = TOYFILE_IO_ERROR;
     }
 
     for (size_t i = 0; status == TOYFILE_OK && i < count; i++) {
@@ -637,7 +663,7 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
             toyfile_close(file);
             break;
         }
-        char* output = child_path(target, names[i], &fs);
+        char* output = child_path(staging, names[i], &fs);
         if (!output) {
             status = TOYFILE_OUT_OF_MEMORY;
         } else {
@@ -647,6 +673,24 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         free(output);
         toyfile_close(file);
     }
+
+    if (status == TOYFILE_OK) {
+        // rename() needs the destination gone. The caller has already
+        // established that the assets root is absent or empty.
+        if (rmdir(target) != 0 && errno != ENOENT) {
+            fs_error(&fs, "cannot clear the assets root %s: %s", target,
+                     strerror(errno));
+            status = TOYFILE_IO_ERROR;
+        } else if (rename(staging, target) != 0) {
+            fs_error(&fs, "cannot move the installed assets into %s: %s",
+                     target, strerror(errno));
+            status = TOYFILE_IO_ERROR;
+        }
+    }
+    if (status != TOYFILE_OK && staging) {
+        toyfile_remove_tree(staging); // best effort; the root was never made
+    }
+    free(staging);
     free(parent);
     for (size_t i = 0; i < count; i++) {
         free(names[i]);

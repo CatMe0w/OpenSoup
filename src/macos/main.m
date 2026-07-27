@@ -91,23 +91,12 @@ static bool show_installer_picker(void) {
 
     const char* path = panel.URL.fileSystemRepresentation;
     char error[1024] = {0};
-    const app_assets_install_status status =
-        app_assets_install_from_installer(
-            path, assets_root, error, sizeof error);
-    if (status == APP_ASSETS_INSTALL_OK) {
+    if (app_assets_install_from_installer(
+            path, assets_root, error, sizeof error)) {
         return true;
     }
-    NSString* information = error[0]
-        ? [NSString stringWithUTF8String:error]
-        : @"OpenSoup could not extract the selected installer.";
-    if (status == APP_ASSETS_INSTALL_FAILED_PARTIAL
-        && !app_assets_remove_partial(assets_root)) {
-        NSString* root = [NSString stringWithUTF8String:assets_root];
-        information = [NSString stringWithFormat:
-            @"%@\n\nRollback failed. Partial assets remain at:\n\n%@",
-            information, root];
-    }
-    show_quit_alert(@"Game asset installation failed", information);
+    show_quit_alert(@"Game asset installation failed",
+                    [NSString stringWithUTF8String:error]);
     return false;
 }
 

@@ -18,20 +18,8 @@ typedef enum {
 // are reported by the application while booting the game.
 app_assets_state app_assets_get_state(const char* assets_root);
 
-typedef enum {
-    APP_ASSETS_INSTALL_OK,
-    APP_ASSETS_INSTALL_FAILED,
-    // Installation failed after creating the assets root. The host should
-    // remove that partial tree with app_assets_remove_partial().
-    APP_ASSETS_INSTALL_FAILED_PARTIAL,
-} app_assets_install_status;
-
-// Removes a partially installed assets tree. Directories created above the
-// assets root itself are left in place; they are shared and harmless.
-bool app_assets_remove_partial(const char* assets_root);
-
-// Decodes the original installer and installs its .toy files into a missing
-// or empty assets root.
-app_assets_install_status app_assets_install_from_installer(
+// Decodes the original installer and installs its .toy files into a missing or
+// empty assets root. On failure `error` always holds a human-readable reason.
+bool app_assets_install_from_installer(
     const char* installer_path, const char* assets_root,
     char* error, size_t error_size);

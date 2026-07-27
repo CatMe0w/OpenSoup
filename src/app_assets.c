@@ -148,20 +148,12 @@ app_assets_state app_assets_get_state(const char* assets_root) {
     return APP_ASSETS_READY;
 }
 
-bool app_assets_remove_partial(const char* assets_root) {
-    return toyfile_remove_tree(assets_root);
-}
-
-typedef struct {
-    const char* assets_root;
-    bool assets_root_created;
-} install_context;
-
 static bool install_assets_from_decoded_toys(
         void* context, const nsis_container* containers, size_t count,
         char* error, size_t error_size) {
-    install_context* install = context;
-    const char* root = install->assets_root;
+    const char* root = context;
+    // An existing empty root is accepted and removed by the install itself,
+    // just before the staging directory is renamed into its place.
     const toyfile_path_kind kind = toyfile_path_stat(root, false);
     if (kind != TOYFILE_PATH_MISSING && kind != TOYFILE_PATH_ERROR) {
         if (kind != TOYFILE_PATH_DIRECTORY
@@ -169,14 +161,6 @@ static bool install_assets_from_decoded_toys(
             if (error && error_size) {
                 snprintf(error, error_size,
                          "assets root is not an empty directory: %s", root);
-            }
-            return false;
-        }
-        if (rmdir(root) != 0) {
-            if (error && error_size) {
-                snprintf(error, error_size,
-                         "cannot remove empty assets root %s: %s",
-                         root, strerror(errno));
             }
             return false;
         }
@@ -211,13 +195,12 @@ static bool install_assets_from_decoded_toys(
     }
 
     const toyfile_status status = toyfile_install_into_assets(
-        inputs, count, root, &install->assets_root_created,
-        error, error_size);
+        inputs, count, root, error, error_size);
     free(inputs);
     return status == TOYFILE_OK;
 }
 
-app_assets_install_status app_assets_install_from_installer(
+bool app_assets_install_from_installer(
         const char* installer_path, const char* assets_root,
         char* error, size_t error_size) {
     if (error && error_size) {
@@ -228,18 +211,16 @@ app_assets_install_status app_assets_install_from_installer(
         if (error && error_size) {
             snprintf(error, error_size, "missing installer or assets root");
         }
-        return APP_ASSETS_INSTALL_FAILED;
+        return false;
     }
 
-    install_context context = {.assets_root = assets_root};
     const bool ok = nsis_decode_containers(
         installer_path, NSIS_CONTAINER_TOY,
-        install_assets_from_decoded_toys, &context,
+        install_assets_from_decoded_toys, (void*)assets_root,
         error, error_size);
-    if (ok) {
-        return APP_ASSETS_INSTALL_OK;
+    if (!ok && error && error_size && !error[0]) {
+        snprintf(error, error_size,
+                 "could not extract the selected installer");
     }
-    return context.assets_root_created
-         ? APP_ASSETS_INSTALL_FAILED_PARTIAL
-         : APP_ASSETS_INSTALL_FAILED;
+    return ok;
 }
