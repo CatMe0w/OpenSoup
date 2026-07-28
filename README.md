@@ -4,7 +4,7 @@
 
 Grab the original Souptoys 1.6.0.8 installer from [here](https://www.majorgeeks.com/files/details/souptoys.html), [here](https://archive.org/details/Souptoys) or [here](https://souptoys.en.uptodown.com/).
 
-Ensure the sha256sum of `souptoys-1.6.0.8.exe` is `f371c2f2e18be60e152fb5e45c2136e9c9b4e4a3efb4007509722354021689e2`.
+Ensure the sha256sum of `souptoys-1.6.0.8.exe` is `f371c2f2e18be60e152fb5e45c2136e9c9b4e4a3efb4007509722354021689e2`. All three sources serve the same file.
 
 Then, build OpenSoup by yourself because we don't have any stable release yet.
 
@@ -40,7 +40,7 @@ cmake --build build
 
 Find the built executable in `build/OpenSoup.app` (macOS) or `build/opensoup` (Linux).
 
-> Linux is not supported yet. _Wayland bad bad_
+> Linux support is work in progress. _Wayland bad bad_
 
 ## License
 
