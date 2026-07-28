@@ -277,6 +277,17 @@ static VALUE input_limb(VALUE self) {
     return sn_get(self)->ref1;
 }
 
+static VALUE eng_drop_position(VALUE self) {
+    sn_t* n = sn_get(self);
+    return vec_new(n->drop_position[0], n->drop_position[1]);
+}
+
+static VALUE eng_drop_position_set(VALUE self, VALUE value) {
+    sn_t* n = sn_get(self);
+    vec_get(value, &n->drop_position[0], &n->drop_position[1]);
+    return value;
+}
+
 static VALUE eng_scale(VALUE self) {
     return rb_float_new(sn_get(self)->scale);
 }
@@ -437,6 +448,8 @@ void rbh_register_engine(void) {
     rb_define_method(c, "input_grab", eng_input_grab, 3);
     rb_define_method(c, "input_move", eng_input_move, 2);
     rb_define_method(c, "input_release", eng_input_release, 3);
+    rb_define_method(c, "drop_position", eng_drop_position, 0);
+    rb_define_method(c, "drop_position=", eng_drop_position_set, 1);
     rb_define_method(c, "scale", eng_scale, 0);
     rb_define_method(c, "scale=", eng_scale_set, 1);
     rb_define_method(c, "gravity", eng_gravity, 0);

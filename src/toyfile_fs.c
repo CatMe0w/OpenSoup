@@ -1,6 +1,7 @@
 #include "toyfile_fs.h"
 
 #include "cJSON.h"
+#include "toyfile_internal.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -461,10 +462,13 @@ toyfile_status toyfile_extract_container(const toyfile* file,
         return TOYFILE_INVALID_ARGUMENT;
     }
 
-    cJSON* manifest = cJSON_Parse(toyfile_manifest_json(file));
-    if (!manifest) {
-        fs_error(&fs, "cannot parse decoded container manifest");
-        return TOYFILE_OUT_OF_MEMORY;
+    char decode_error[320] = {0};
+    cJSON* manifest = NULL;
+    toyfile_status status = toyfile_decode_manifest(
+        file, &manifest, decode_error, sizeof decode_error);
+    if (status != TOYFILE_OK) {
+        fs_error(&fs, "cannot decode toy manifest: %s", decode_error);
+        return status;
     }
     cJSON* toys = cJSON_DetachItemFromObjectCaseSensitive(manifest, "toys");
     const cJSON* properties = cJSON_GetObjectItemCaseSensitive(
@@ -486,7 +490,7 @@ toyfile_status toyfile_extract_container(const toyfile* file,
         cJSON_Delete(manifest);
         return TOYFILE_OUT_OF_MEMORY;
     }
-    toyfile_status status = TOYFILE_OK;
+    status = TOYFILE_OK;
     for (int i = 0; i < count; i++) {
         const cJSON* toy = cJSON_GetArrayItem(toys, i);
         const cJSON* id = cJSON_GetObjectItemCaseSensitive(toy, "id");

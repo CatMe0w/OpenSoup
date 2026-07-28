@@ -55,6 +55,7 @@ if(APPLE)
         src/toybox_scroll.c
         src/physics.c
         src/toyfile.c
+        src/toyfile_playset.c
         src/toyfile_fs.c
         src/nsis.c
         src/toydefs.c
@@ -120,6 +121,7 @@ elseif(WIN32 AND MINGW)
         src/toybox_scroll.c
         src/physics.c
         src/toyfile.c
+        src/toyfile_playset.c
         src/toyfile_fs.c
         src/nsis.c
         src/toydefs.c
@@ -174,6 +176,7 @@ add_executable(opensoup_rubyboot
     src/toybox_scroll.c
     src/physics.c
     src/toyfile.c
+    src/toyfile_playset.c
     src/toyfile_fs.c
     src/toydefs.c
     src/audio.c

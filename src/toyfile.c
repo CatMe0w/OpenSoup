@@ -1,6 +1,8 @@
 #include "toyfile.h"
 
 #include "cJSON.h"
+#include "toyfile_internal.h"
+#include "toyfile_reader.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -11,8 +13,9 @@
 
 #define TOYFILE_MAGIC "SOUPTOYS.COM TOY FORMAT\0"
 #define TOYFILE_MAGIC_SIZE 24
-#define TOYFILE_V4_MD5_STATE_SIZE 96
-#define TOYFILE_V4_FOOTER_SIZE (4 + TOYFILE_V4_MD5_STATE_SIZE)
+#define TOYFILE_MD5_STATE_SIZE 96
+#define TOYFILE_OLD_FOOTER_SIZE 4
+#define TOYFILE_NEW_FOOTER_SIZE (4 + TOYFILE_MD5_STATE_SIZE)
 
 typedef struct {
     const char* name;
@@ -29,21 +32,11 @@ struct toyfile {
     bool owns_data;
     size_t magic_offset;
     size_t resource_data_offset;
+    uint32_t version;
     toyfile_resource* resources;
     size_t resource_count;
-    char* manifest_json;
-    bool out_of_memory;
     char error[320];
 };
-
-typedef struct {
-    const unsigned char* data;
-    size_t size;
-    size_t offset;
-    bool ok;
-    bool out_of_memory;
-    char error[256];
-} reader;
 
 static bool raw_u32(const unsigned char* data, size_t size, size_t offset,
                     uint32_t* value);
@@ -58,131 +51,15 @@ static void file_error(toyfile* file, const char* fmt, ...) {
     va_end(ap);
 }
 
-static void reader_error(reader* r, const char* fmt, ...) {
-    if (!r || !r->ok) {
+static void manifest_error(char* error, size_t error_size,
+                           const char* fmt, ...) {
+    if (!error || error_size == 0) {
         return;
     }
-    r->ok = false;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(r->error, sizeof r->error, fmt, ap);
+    vsnprintf(error, error_size, fmt, ap);
     va_end(ap);
-}
-
-static void reader_oom(reader* r, const char* fmt, ...) {
-    if (!r || !r->ok) {
-        return;
-    }
-    r->ok = false;
-    r->out_of_memory = true;
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(r->error, sizeof r->error, fmt, ap);
-    va_end(ap);
-}
-
-static bool r_need(reader* r, size_t count) {
-    if (!r->ok) {
-        return false;
-    }
-    if (r->offset > r->size || count > r->size - r->offset) {
-        reader_error(r, "truncated input at 0x%zx (need %zu bytes)",
-                     r->offset, count);
-        return false;
-    }
-    return true;
-}
-
-static uint8_t r_u8(reader* r) {
-    if (!r_need(r, 1)) {
-        return 0;
-    }
-    return r->data[r->offset++];
-}
-
-static uint32_t r_u32(reader* r) {
-    if (!r_need(r, 4)) {
-        return 0;
-    }
-    const unsigned char* p = r->data + r->offset;
-    r->offset += 4;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static float r_f32(reader* r) {
-    const uint32_t bits = r_u32(r);
-    float value = 0.0f;
-    if (r->ok) {
-        memcpy(&value, &bits, sizeof value);
-    }
-    return value;
-}
-
-// Consume a fixed-width field observed to be zero-filled in every original V4
-// container examined. Naming the field in the error keeps these otherwise
-// discarded bytes visible in the parser, which also records the inferred
-// binary structure.
-static bool r_zeroes(reader* r, size_t count, const char* field) {
-    if (!r_need(r, count)) {
-        return false;
-    }
-    for (size_t i = 0; i < count; i++) {
-        if (r->data[r->offset + i] != 0) {
-            reader_error(r, "%s contains non-zero byte at 0x%zx", field,
-                         r->offset + i);
-            return false;
-        }
-    }
-    r->offset += count;
-    return true;
-}
-
-// The original strings are length-prefixed Latin-1. The shipped corpus is
-// ASCII, but converting the upper half keeps the JSON valid for other files.
-static const unsigned char* r_lpstr_slice(reader* r, size_t* length_out) {
-    const uint32_t length = r_u32(r);
-    if (!r->ok) {
-        return NULL;
-    }
-    if (!r_need(r, length)) {
-        return NULL;
-    }
-    const unsigned char* result = r->data + r->offset;
-    r->offset += length;
-    if (length_out) {
-        *length_out = length;
-    }
-    return result;
-}
-
-static char* r_string(reader* r) {
-    size_t length = 0;
-    const unsigned char* source = r_lpstr_slice(r, &length);
-    if (!source) {
-        return NULL;
-    }
-    char* result = malloc(length * 2 + 1);
-    if (!result) {
-        reader_oom(r, "out of memory reading string at 0x%zx", r->offset);
-        return NULL;
-    }
-    size_t out = 0;
-    for (size_t i = 0; i < length; i++) {
-        const unsigned char ch = source[i];
-        if (ch < 0x80) {
-            result[out++] = (char)ch;
-        } else {
-            result[out++] = (char)(0xc0 | (ch >> 6));
-            result[out++] = (char)(0x80 | (ch & 0x3f));
-        }
-    }
-    result[out] = 0;
-    return result;
-}
-
-static bool r_skip_string(reader* r) {
-    return r_lpstr_slice(r, NULL) != NULL;
 }
 
 // Object keys passed here must have static storage. Dynamic property names use
@@ -236,6 +113,10 @@ static bool json_i32(cJSON* object, const char* key, reader* r) {
     return r->ok && json_number(object, key, value, r);
 }
 
+static bool json_null(cJSON* object, const char* key, reader* r) {
+    return json_add(object, key, cJSON_CreateNull(), r);
+}
+
 static bool json_bool8(cJSON* object, const char* key, reader* r) {
     const bool value = r_u8(r) != 0;
     return r->ok && json_bool(object, key, value, r);
@@ -247,7 +128,7 @@ static bool json_optional_f32(cJSON* object, const char* key, reader* r) {
         return false;
     }
     return present ? json_f32(object, key, r)
-                   : json_add(object, key, cJSON_CreateNull(), r);
+                   : json_null(object, key, r);
 }
 
 static cJSON* parse_vec2(reader* r) {
@@ -742,78 +623,188 @@ static cJSON* parse_icon(reader* r) {
     return icon;
 }
 
-static cJSON* parse_manifest(toyfile* file) {
-    reader r = {file->data, file->resource_data_offset,
-                file->magic_offset + TOYFILE_MAGIC_SIZE + 4,
-                true, false, {0}};
-    // V4 header: lpstr versionString, zero u32 reserved, lpstr vendor,
-    // followed by 36 bytes of zero padding.
-    (void)r_skip_string(&r);
-    const uint32_t header_reserved = r_u32(&r);
-    (void)r_skip_string(&r);
-    if (r.ok && header_reserved != 0) {
-        reader_error(&r, "container header reserved field is non-zero");
+static bool skip_info(reader* r) {
+    for (size_t i = 0; i < 4; i++) {
+        (void)r_skip_string(r);
     }
-    if (!r.ok
-        || !r_zeroes(&r, 36, "container header padding")) {
-        file->out_of_memory = r.out_of_memory;
-        file_error(file, "%s", r.error);
-        return NULL;
+    for (size_t i = 0; i < 4; i++) {
+        (void)r_u32(r);
     }
+    for (size_t i = 0; i < 4; i++) {
+        (void)r_skip_string(r);
+    }
+    return r->ok;
+}
 
-    uint32_t variant_word = 0;
-    if (!raw_u32(r.data, r.size, r.offset, &variant_word)) {
-        reader_error(&r, "truncated manifest variant at 0x%zx", r.offset);
+static bool skip_optional_f32(reader* r) {
+    const bool present = r_u8(r) != 0;
+    if (r->ok && present) {
+        (void)r_f32(r);
     }
-    cJSON* properties = NULL;
-    if (r.ok && variant_word == 0) {
-        // Empty property table: zero group count plus its six-byte terminator.
-        if (r_zeroes(&r, 10, "empty property-table encoding")) {
-            properties = cJSON_CreateObject();
+    return r->ok;
+}
+
+static bool skip_optional_vec2(reader* r) {
+    const bool present = r_u8(r) != 0;
+    if (r->ok && present) {
+        (void)r_f32(r);
+        (void)r_f32(r);
+    }
+    return r->ok;
+}
+
+static bool skip_world(reader* r, uint32_t version) {
+    for (size_t i = 0; i < 6; i++) {
+        if (!skip_optional_f32(r)) {
+            return false;
         }
-    } else {
-        properties = parse_property_groups(&r);
-        // A populated property table has the same six-byte zero terminator.
-        (void)r_zeroes(&r, 6, "property-table terminator");
     }
-    if (!r.ok || !properties) {
-        file->out_of_memory = r.out_of_memory || (r.ok && !properties);
-        file_error(file, "%s", r.error[0] ? r.error
-                                           : "out of memory creating properties");
-        cJSON_Delete(properties);
+    if (version <= 3) {
+        const bool deprecated_record = r_u8(r) != 0;
+        if (!r->ok || (deprecated_record && !r_skip(r, 29))) {
+            return false;
+        }
+        return version == 1 || skip_optional_vec2(r);
+    }
+    return skip_optional_vec2(r);
+}
+
+static bool skip_sprite(reader* r) {
+    (void)r_skip_string(r);
+    (void)r_u32(r);
+    (void)r_skip_string(r);
+    (void)r_f32(r);
+    (void)r_f32(r);
+    (void)r_u32(r);
+    return r->ok;
+}
+
+static bool skip_toybox(reader* r, uint32_t version) {
+    if (version <= 3) {
+        reader_error(r, "legacy toybox payloads are unsupported at 0x%zx",
+                     r->offset);
+        return false;
+    }
+    (void)r_skip_string(r);
+    (void)r_skip_string(r);
+    (void)r_f32(r);
+    (void)r_f32(r);
+    (void)r_u32(r);
+    return skip_sprite(r) && skip_sprite(r);
+}
+
+static cJSON* parse_empty_legacy_section(reader* r, const char* what) {
+    const uint32_t count = r_u32(r);
+    if (r->ok && count != 0) {
+        reader_error(r, "legacy %s count %u is unsupported", what, count);
+    }
+    cJSON* array = r->ok ? cJSON_CreateArray() : NULL;
+    if (r->ok && !array) {
+        reader_oom(r, "out of memory creating %s array", what);
+    }
+    return array;
+}
+
+static cJSON* parse_manifest_body(const toyfile* file,
+                                  toyfile_status* status,
+                                  char* error, size_t error_size) {
+    toyfile_body body = {0};
+    if (!toyfile_get_body(file, &body)) {
+        *status = TOYFILE_INVALID_FORMAT;
+        manifest_error(error, error_size, "container has no decoded body");
         return NULL;
     }
+    reader r = {body.data, body.size, 0, true, false, {0}};
+    cJSON* properties = NULL;
+    cJSON* icons = NULL;
+    cJSON* toys = NULL;
+    cJSON* manifest = NULL;
 
-    cJSON* icons = parse_counted(&r, "icon", parse_icon);
-    cJSON* toys = parse_counted(&r, "toy definition", parse_toy);
-    if (r.ok && r.size - r.offset != 8) {
-        reader_error(&r, "manifest leaves %zu bytes before resource data",
+    if (!skip_info(&r)) {
+        goto fail;
+    }
+    properties = parse_property_groups(&r);
+    if (body.version == 4) {
+        const uint32_t collision_count = r_u32(&r);
+        if (r.ok && collision_count != 0) {
+            reader_error(&r, "collision config count %u is unsupported",
+                         collision_count);
+        }
+    }
+
+    const bool world_present = r_u8(&r) != 0;
+    if (r.ok && world_present && !skip_world(&r, body.version)) {
+        goto fail;
+    }
+    const bool toybox_present = r_u8(&r) != 0;
+    if (r.ok && toybox_present && !skip_toybox(&r, body.version)) {
+        goto fail;
+    }
+
+    if (body.version == 4) {
+        icons = parse_counted(&r, "icon", parse_icon);
+        toys = parse_counted(&r, "toy definition", parse_toy);
+    } else {
+        icons = parse_empty_legacy_section(&r, "icon");
+        toys = parse_empty_legacy_section(&r, "toy definition");
+    }
+
+    const uint32_t instance_count = r_u32(&r);
+    if (r.ok && instance_count != 0) {
+        reader_error(&r, "container carries %u playset instances",
+                     instance_count);
+    }
+    if (body.version > 1) {
+        const uint32_t input_map_count = r_u32(&r);
+        if (r.ok && input_map_count != 0) {
+            reader_error(&r, "input-event map count %u is unsupported",
+                         input_map_count);
+        }
+    }
+    if (r.ok && r.offset != r.size) {
+        reader_error(&r, "body leaves %zu bytes before resource data",
                      r.size - r.offset);
     }
-    // The definition stream ends with an eight-byte zero terminator immediately
-    // before the first resource payload.
-    (void)r_zeroes(&r, 8, "definition-stream terminator");
-    if (!r.ok) {
-        file->out_of_memory = r.out_of_memory;
-        file_error(file, "%s", r.error);
-        cJSON_Delete(properties);
-        cJSON_Delete(icons);
-        cJSON_Delete(toys);
-        return NULL;
+    if (!r.ok || !properties || !icons || !toys) {
+        goto fail;
     }
-    cJSON* root = cJSON_CreateObject();
-    if (!root) {
-        cJSON_Delete(properties);
-        cJSON_Delete(icons);
-        cJSON_Delete(toys);
-        file->out_of_memory = true;
-        file_error(file, "out of memory assembling manifest");
-        return NULL;
+    if (world_present && cJSON_GetArraySize(icons) == 0
+        && cJSON_GetArraySize(toys) == 0) {
+        reader_error(&r, "container is a playset, not a toy pack");
+        goto fail;
     }
-    (void)cJSON_AddItemToObjectCS(root, "properties", properties);
-    (void)cJSON_AddItemToObjectCS(root, "icons", icons);
-    (void)cJSON_AddItemToObjectCS(root, "toys", toys);
-    return root;
+
+    manifest = cJSON_CreateObject();
+    if (!manifest) {
+        reader_oom(&r, "out of memory creating toy manifest");
+        goto fail;
+    }
+    if (!json_add(manifest, "properties", properties, &r)) {
+        goto fail;
+    }
+    properties = NULL;
+    if (!json_add(manifest, "icons", icons, &r)) {
+        goto fail;
+    }
+    icons = NULL;
+    if (!json_add(manifest, "toys", toys, &r)) {
+        goto fail;
+    }
+    toys = NULL;
+    *status = TOYFILE_OK;
+    return manifest;
+
+fail:
+    *status = r.out_of_memory ? TOYFILE_OUT_OF_MEMORY
+                              : TOYFILE_INVALID_FORMAT;
+    manifest_error(error, error_size, "%s",
+                   r.error[0] ? r.error
+                              : "out of memory decoding toy manifest");
+    cJSON_Delete(properties);
+    cJSON_Delete(icons);
+    cJSON_Delete(toys);
+    cJSON_Delete(manifest);
+    return NULL;
 }
 
 static bool raw_u32(const unsigned char* data, size_t size, size_t offset,
@@ -934,17 +925,20 @@ static bool parse_payload_bounds(toyfile* file) {
 }
 
 static toyfile_status parse_resources(toyfile* file) {
+    const size_t footer_size = file->version < 3
+        ? TOYFILE_OLD_FOOTER_SIZE : TOYFILE_NEW_FOOTER_SIZE;
     if (file->size < file->magic_offset
-        || file->size - file->magic_offset < TOYFILE_V4_FOOTER_SIZE) {
-        file_error(file, "container is too small for the V4 footer");
+        || file->size - file->magic_offset < footer_size) {
+        file_error(file, "container is too small for the version %u footer",
+                   file->version);
         return TOYFILE_INVALID_FORMAT;
     }
-    const size_t footer_offset = file->size - TOYFILE_V4_FOOTER_SIZE;
+    const size_t footer_offset = file->size - footer_size;
     uint32_t directory_relative = 0;
     if (!raw_u32(file->data, file->size, footer_offset,
                  &directory_relative)
         || (size_t)directory_relative > footer_offset - file->magic_offset) {
-        file_error(file, "invalid V4 resource-directory offset");
+        file_error(file, "invalid resource-directory offset");
         return TOYFILE_INVALID_FORMAT;
     }
     const size_t directory_offset = file->magic_offset
@@ -1040,32 +1034,17 @@ static toyfile_status parse_file(toyfile* file) {
     if (!parse_payload_bounds(file)) {
         return TOYFILE_INVALID_FORMAT;
     }
-    uint32_t version = 0;
     if (!raw_u32(file->data, file->size,
-                 file->magic_offset + TOYFILE_MAGIC_SIZE, &version)) {
+                 file->magic_offset + TOYFILE_MAGIC_SIZE, &file->version)) {
         file_error(file, "truncated container header");
         return TOYFILE_INVALID_FORMAT;
     }
-    if (version != 4) {
-        file_error(file, "unsupported Souptoys container version %u", version);
+    if (file->version < 1 || file->version > 4) {
+        file_error(file, "unsupported Souptoys container version %u",
+                   file->version);
         return TOYFILE_INVALID_FORMAT;
     }
-    toyfile_status status = parse_resources(file);
-    if (status != TOYFILE_OK) {
-        return status;
-    }
-    cJSON* manifest = parse_manifest(file);
-    if (!manifest) {
-        return file->out_of_memory ? TOYFILE_OUT_OF_MEMORY
-                                   : TOYFILE_INVALID_FORMAT;
-    }
-    file->manifest_json = cJSON_PrintUnformatted(manifest);
-    cJSON_Delete(manifest);
-    if (!file->manifest_json) {
-        file_error(file, "out of memory serializing manifest");
-        return TOYFILE_OUT_OF_MEMORY;
-    }
-    return TOYFILE_OK;
+    return parse_resources(file);
 }
 
 toyfile_status toyfile_open_path(const char* path, toyfile** out) {
@@ -1140,7 +1119,6 @@ void toyfile_close(toyfile* file) {
         return;
     }
     free(file->resources);
-    free(file->manifest_json);
     if (file->owns_data) {
         free(file->data);
     }
@@ -1151,8 +1129,45 @@ const char* toyfile_error(const toyfile* file) {
     return file && file->error[0] ? file->error : "unknown toyfile error";
 }
 
-const char* toyfile_manifest_json(const toyfile* file) {
-    return file ? file->manifest_json : NULL;
+toyfile_status toyfile_decode_manifest(const toyfile* file,
+                                       struct cJSON** out,
+                                       char* error, size_t error_size) {
+    if (error && error_size) {
+        error[0] = 0;
+    }
+    if (!out) {
+        manifest_error(error, error_size, "missing manifest output");
+        return TOYFILE_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+    if (!file) {
+        manifest_error(error, error_size, "missing container");
+        return TOYFILE_INVALID_ARGUMENT;
+    }
+
+    toyfile_status status = TOYFILE_INVALID_FORMAT;
+    cJSON* manifest = parse_manifest_body(file, &status, error, error_size);
+    if (status == TOYFILE_OK) {
+        *out = manifest;
+    }
+    return status;
+}
+
+bool toyfile_get_body(const toyfile* file, toyfile_body* out) {
+    if (!file || !out) {
+        return false;
+    }
+    const size_t start = file->magic_offset + TOYFILE_MAGIC_SIZE + 4;
+    if (start > file->resource_data_offset
+        || file->resource_data_offset > file->size) {
+        return false;
+    }
+    *out = (toyfile_body){
+        file->data + start,
+        file->resource_data_offset - start,
+        file->version,
+    };
+    return true;
 }
 
 size_t toyfile_resource_count(const toyfile* file) {

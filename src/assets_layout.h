@@ -1,9 +1,9 @@
 #pragma once
 #include <stdio.h>
 
-// The extracted-assets tree convention, in one place. Each container
-// (<name>_toy / <name>_playset dir under the assets root) is a self-contained
-// unit holding the decoded parts of that one original container:
+// The extracted-assets tree convention, in one place. Each <name>_toy
+// directory under the assets root is a self-contained unit holding the decoded
+// parts of that one original container:
 //   assets/<container>/manifest.json          properties + icon catalog
 //   assets/<container>/defs/<classname>.json  decoded CToy records
 //   assets/<container>/resources/...          resource VFS

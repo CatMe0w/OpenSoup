@@ -2,9 +2,9 @@
 
 #include <stddef.h>
 
-// Decoder for the original "SOUPTOYS.COM TOY FORMAT" containers. The parser
-// owns the file data so all returned pointers remain valid until
-// toyfile_close().
+// Decoder for the framing and resource table of original
+// "SOUPTOYS.COM TOY FORMAT" containers. Path-backed handles own the file data;
+// memory-backed handles borrow it until toyfile_close().
 
 typedef struct toyfile toyfile;
 
@@ -26,10 +26,6 @@ void toyfile_close(toyfile* file);
 
 // Human-readable parse/open error. Valid until toyfile_close().
 const char* toyfile_error(const toyfile* file);
-
-// Borrowed raw per-container manifest JSON: properties + original icon catalog
-// + CToy definitions. Valid until toyfile_close().
-const char* toyfile_manifest_json(const toyfile* file);
 
 size_t toyfile_resource_count(const toyfile* file);
 

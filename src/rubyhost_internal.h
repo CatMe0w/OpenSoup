@@ -49,6 +49,7 @@ typedef struct {
     int sound_max, sound_window_count, sound_window_valid;
     double timer_tick;      // SN_ENGINE: dispatch_timers position, 1/100 s
     double scene_bl[2], scene_tr[2], canvas_tl[2], canvas_br[2];
+    double drop_position[2];
     double scale, gravity, timestep, timescale, time;
     int paused;
     VALUE engines;          // SN_CORE

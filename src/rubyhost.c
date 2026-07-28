@@ -10,6 +10,8 @@
 #include "rubyhost.h"
 #include "assets_layout.h"
 #include "physics.h"
+#include "toyfile.h"
+#include "toyfile_playset.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,6 +137,158 @@ static VALUE soup_console_open_p(VALUE self) {
     return Qtrue; // dev: keeps the framework's gated Object#puts audible
 }
 
+static VALUE playset_error_class(void) {
+    const ID id = rb_intern("PlaysetParseError");
+    return rb_const_defined(rb_cObject, id)
+        ? rb_const_get(rb_cObject, id) : rb_eRuntimeError;
+}
+
+static void playset_hash_set(VALUE hash, const char* key, VALUE value) {
+    rb_hash_aset(hash, ID2SYM(rb_intern(key)), value);
+}
+
+static VALUE playset_optional_float_to_ruby(
+        const toyfile_optional_float* value) {
+    return value->present ? rb_float_new(value->value) : Qnil;
+}
+
+static VALUE playset_optional_vec2_to_ruby(
+        const toyfile_optional_vec2* value) {
+    return value->present
+        ? vec_new(value->value[0], value->value[1]) : Qnil;
+}
+
+static VALUE playset_header_to_ruby(const toyfile_playset* playset) {
+    VALUE hash = rb_hash_new();
+    playset_hash_set(hash, "format_name",
+                     rb_str_new2("SOUPTOYS.COM TOY FORMAT"));
+    playset_hash_set(hash, "version",
+                     ULONG2NUM((unsigned long)playset->source_version));
+    return hash;
+}
+
+static VALUE playset_info_to_ruby(const toyfile_playset_info* info) {
+    struct {
+        const char* key;
+        const char* value;
+    } fields[] = {
+        {"version_description", info->version_description},
+        {"file_description", info->file_description},
+        {"author", info->author},
+        {"creation_date", info->creation_date},
+    };
+    VALUE hash = rb_hash_new();
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+        playset_hash_set(hash, fields[i].key, rb_str_new2(fields[i].value));
+    }
+    return hash;
+}
+
+static VALUE playset_world_to_ruby(const toyfile_playset* playset) {
+    if (!playset->has_world) {
+        return Qnil;
+    }
+    const toyfile_playset_world* world = &playset->world;
+    struct {
+        const char* key;
+        const toyfile_optional_float* value;
+    } fields[] = {
+        {"left_wall", &world->left_wall},
+        {"right_wall", &world->right_wall},
+        {"floor", &world->floor},
+        {"ceiling", &world->ceiling},
+        {"timestep", &world->timestep},
+        {"gravity", &world->gravity},
+    };
+    VALUE hash = rb_hash_new();
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+        playset_hash_set(hash, fields[i].key,
+                         playset_optional_float_to_ruby(fields[i].value));
+    }
+    playset_hash_set(hash, "drop_position",
+                     playset_optional_vec2_to_ruby(&world->drop_position));
+    return hash;
+}
+
+static VALUE playset_limb_to_ruby(const toyfile_playset_limb* limb) {
+    VALUE hash = rb_hash_new();
+    playset_hash_set(hash, "limb_id",
+                     ID2SYM(rb_intern(limb->limb_id)));
+    playset_hash_set(hash, "position",
+                     vec_new(limb->position[0], limb->position[1]));
+    playset_hash_set(hash, "orientation",
+                     rb_float_new(limb->orientation));
+    playset_hash_set(hash, "momentum",
+                     vec_new(limb->momentum[0], limb->momentum[1]));
+    playset_hash_set(hash, "angular_momentum",
+                     rb_float_new(limb->angular_momentum));
+    return hash;
+}
+
+static VALUE playset_toy_to_ruby(const toyfile_playset_toy* toy) {
+    VALUE hash = rb_hash_new();
+    playset_hash_set(hash, "toy_instance_id",
+                     LONG2NUM((long)toy->toy_instance_id));
+    playset_hash_set(hash, "toy_id",
+                     ID2SYM(rb_intern(toy->toy_id)));
+    playset_hash_set(hash, "extra", rb_str_new2(toy->extra));
+
+    VALUE array = rb_ary_new2((long)toy->limb_count);
+    for (size_t i = 0; i < toy->limb_count; i++) {
+        rb_ary_push(array, playset_limb_to_ruby(&toy->limbs[i]));
+    }
+    playset_hash_set(hash, "limbs", array);
+    return hash;
+}
+
+static VALUE playset_to_ruby(const toyfile_playset* playset) {
+    VALUE result = rb_hash_new();
+    playset_hash_set(result, "header", playset_header_to_ruby(playset));
+    playset_hash_set(result, "info", playset_info_to_ruby(&playset->info));
+    playset_hash_set(result, "world", playset_world_to_ruby(playset));
+
+    VALUE array = rb_ary_new2((long)playset->toy_count);
+    for (size_t i = 0; i < playset->toy_count; i++) {
+        rb_ary_push(array, playset_toy_to_ruby(&playset->toys[i]));
+    }
+    playset_hash_set(result, "toy_instances", array);
+    return result;
+}
+
+static VALUE playset_to_ruby_ensure(VALUE playset_value) {
+    return playset_to_ruby((const toyfile_playset*)playset_value);
+}
+
+static VALUE playset_free_ensure(VALUE playset_value) {
+    toyfile_playset_free((toyfile_playset*)playset_value);
+    return Qnil;
+}
+
+static VALUE soup_read_playset(VALUE self, VALUE path) {
+    (void)self;
+    VALUE path_string = rb_obj_as_string(path);
+    toyfile* file = NULL;
+    toyfile_status status = toyfile_open_path(
+        StringValueCStr(path_string), &file);
+    if (status != TOYFILE_OK) {
+        char error[320];
+        (void)snprintf(error, sizeof error, "%s", toyfile_error(file));
+        toyfile_close(file);
+        rb_raise(playset_error_class(), "%s", error);
+    }
+
+    toyfile_playset* playset = NULL;
+    char error[320];
+    status = toyfile_playset_decode(file, &playset, error, sizeof error);
+    toyfile_close(file);
+    if (status != TOYFILE_OK) {
+        rb_raise(playset_error_class(), "%s",
+                 error[0] ? error : "could not decode playset");
+    }
+    return rb_ensure(playset_to_ruby_ensure, (VALUE)playset,
+                     playset_free_ensure, (VALUE)playset);
+}
+
 // registration
 
 static VALUE lookup_super(const char* name) {
@@ -195,6 +349,7 @@ static void register_soup(void) {
     rb_define_method(c, "load_paths=", soup_load_paths_set, 1);
     rb_define_method(c, "exe_path", soup_exe_path, 0);
     rb_define_method(c, "console_open?", soup_console_open_p, 0);
+    rb_define_method(c, "read_playset", soup_read_playset, 1);
 }
 
 static void build_license_properties(void) {
