@@ -49,6 +49,38 @@ REPLACEMENTS = (
         bytes.fromhex("0f b6 55 f3 85 d2 75 4e 0f b6 45 10 85 c0 75 46"),
         bytes.fromhex("0f b6 55 f3 85 d2 eb 4e 0f b6 45 10 85 c0 75 46"),
     ),
+    # VA 0x4F3F57 / 0x4F3FBD: drop AllocConsole, preserving redirected standard handles.
+    (
+        bytes.fromhex("c7 06 18 16 6d 00 89 46 2d 89 46 31 ff 15 08 63 6b 00"),
+        bytes.fromhex("c7 06 18 16 6d 00 89 46 2d 89 46 31 90 90 90 90 90 90"),
+    ),
+    (
+        bytes.fromhex("c7 46 2d 00 00 00 00 89 46 31 ff 15 08 63 6b 00"),
+        bytes.fromhex("c7 46 2d 00 00 00 00 89 46 31 90 90 90 90 90 90"),
+    ),
+    # VA 0x4F41FD: ReadConsoleA -> ReadFile, allowing redirected stdin.
+    (
+        bytes.fromhex("8b 3d 00 63 6b 00 89 9c 24 e0 00 00 00"),
+        bytes.fromhex("8b 3d 24 62 6b 00 89 9c 24 e0 00 00 00"),
+    ),
+    # VA 0x4F40EB: WriteConsoleA -> WriteFile, allowing redirected stdout.
+    (
+        bytes.fromhex("8b 41 29 50 ff 15 38 62 6b 00"),
+        bytes.fromhex("8b 41 29 50 ff 15 a8 61 6b 00"),
+    ),
+    # VA 0x4F3F68 / 0x4F3FCE: drop freopen("CONOUT$") so Ruby keeps redirected stdout.
+    (
+        bytes.fromhex("e8 50 a4 f6 ff 83 c0 20 50 68 6c f9 6f 00 68 fc 15 6d 00"
+                      "e8 c1 ad 10 00 8b 3d ac 61 6b 00 83 c4 0c"),
+        bytes.fromhex("90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90"
+                      "90 90 90 90 90 8b 3d ac 61 6b 00 90 90 90"),
+    ),
+    (
+        bytes.fromhex("e8 ea a3 f6 ff 83 c0 20 50 68 6c f9 6f 00 68 fc 15 6d 00"
+                      "e8 5b ad 10 00 8b 3d ac 61 6b 00 83 c4 0c"),
+        bytes.fromhex("90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90"
+                      "90 90 90 90 90 8b 3d ac 61 6b 00 90 90 90"),
+    ),
 )
 
 
