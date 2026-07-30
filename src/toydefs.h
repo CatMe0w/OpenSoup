@@ -36,6 +36,22 @@ typedef struct {
     int z_order;  // smaller = nearer the viewer; draw descending
 } td_sprite;
 
+// A magnet node in a toy definition: either a producer or a consumer.
+// Producers and consumers pair by group name across the whole scene;
+// a producer attracts every same-group consumer within its radius.
+// Consumer-side fields below `attach` are ignored (Magnet_apply @0x532E70).
+typedef struct {
+    bool  producer;
+    char* group;            // original: magnetGroup, matched by name
+    float attach[2];        // original: attachPoint, limb-local toy units
+    bool  bidirectional;    // producer takes the equal-and-opposite reaction
+    bool  inverted;         // negate force (repellers, tractor beams)
+    bool  spring_response;
+    float stiffness;
+    float dampener;
+    float radius;           // original: range, toy-local units
+} td_magnet;
+
 typedef struct {
     char* name;
     float rest_pos[2];  // bodyState pos, toy-local
@@ -48,6 +64,7 @@ typedef struct {
     float mouse_dampener;
     float air_resistance_linear;
     float air_resistance_angular;
+    float centre_of_resistance[2]; // toy-local; where drag acts, NOT the CoM
     bool fixed_move;
     bool fixed_rotate;
     bool default_grab_move;
@@ -61,9 +78,12 @@ typedef struct {
     td_shape* shapes;
     int nsprites;
     td_sprite* sprites;
+    int nmagnets;         // producers first, then consumers, as the def lists them
+    td_magnet* magnets;
 } td_limb;
 
 typedef struct {
+    char* sid;   // scripts address joints via joints.by_sid(:sid)
     int limb1, limb2;             // limb indices, -1 if the name didn't resolve
     float anchor1[2], anchor2[2]; // limb-local, toy-local units
     float rest_length;
@@ -72,6 +92,7 @@ typedef struct {
 } td_joint;
 
 typedef struct {
+    char* sid;
     int limb1, limb2;
     float orientation1, orientation2;
     // decoded field order [rest, stiffness, dampener] matches the linear

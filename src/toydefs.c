@@ -94,6 +94,10 @@ static void parse_limb(td_limb* l, const cJSON* limb, const char* container) {
     l->mouse_dampener = num(limb, "mouseDampenerOverride", PHYS_MOUSE_DAMPENER);
     l->air_resistance_linear = num(limb, "airResistanceLinear", 0.0f);
     l->air_resistance_angular = num(limb, "airResistanceAngular", 0.0f);
+    const cJSON* cor = cJSON_GetObjectItemCaseSensitive(limb,
+                                                        "centreOfResistance");
+    l->centre_of_resistance[0] = idx(cor, 0, 0.0f);
+    l->centre_of_resistance[1] = idx(cor, 1, 0.0f);
     l->fixed_move = boolean(limb, "fixedMove", false);
     l->fixed_rotate = boolean(limb, "fixedRotate", false);
     l->default_grab_move = boolean(limb, "defaultGrabMove", true);
@@ -147,6 +151,38 @@ static void parse_limb(td_limb* l, const cJSON* limb, const char* container) {
     }
 
     l->sprites = parse_sprites(limb, container, &l->nsprites);
+
+    // producers first, then consumers, the order the engine's limb realizer
+    // (sub_5BC270) appends them in
+    const cJSON* mp = cJSON_GetObjectItemCaseSensitive(limb, "magnetProducer");
+    const cJSON* mc = cJSON_GetObjectItemCaseSensitive(limb, "magnetConsumer");
+    l->nmagnets = cJSON_GetArraySize(mp) + cJSON_GetArraySize(mc);
+    l->magnets = calloc((size_t)l->nmagnets ? (size_t)l->nmagnets : 1,
+                        sizeof(td_magnet));
+    int mi = 0;
+    const cJSON* mag;
+    cJSON_ArrayForEach(mag, mp) {
+        td_magnet* d = &l->magnets[mi++];
+        d->producer = true;
+        d->group = dupstr(mag, "magnetGroup");
+        const cJSON* ap = cJSON_GetObjectItemCaseSensitive(mag, "attachPoint");
+        d->attach[0] = idx(ap, 0, 0.0f);
+        d->attach[1] = idx(ap, 1, 0.0f);
+        d->bidirectional = boolean(mag, "biDirectional", false);
+        d->inverted = boolean(mag, "inverted", false);
+        d->spring_response = boolean(mag, "springResponse", false);
+        d->stiffness = num(mag, "stiffness", 0.0f);
+        d->dampener = num(mag, "dampener", 0.0f);
+        d->radius = num(mag, "radius", 0.0f);
+    }
+    cJSON_ArrayForEach(mag, mc) {
+        td_magnet* d = &l->magnets[mi++];
+        d->producer = false;
+        d->group = dupstr(mag, "magnetGroup");
+        const cJSON* ap = cJSON_GetObjectItemCaseSensitive(mag, "attachPoint");
+        d->attach[0] = idx(ap, 0, 0.0f);
+        d->attach[1] = idx(ap, 1, 0.0f);
+    }
 
     // motors fold to constant per-limb force/torque; the on/off scripting
     // (Ruby motor.force=) comes with the runtime milestone
@@ -333,6 +369,7 @@ static void load_toy_file(const char* path, const char* container) {
         const cJSON* joint;
         cJSON_ArrayForEach(joint, joints) {
             td_joint* j = &d->joints[ji++];
+            j->sid = dupstr(joint, "id");
             // limb1/limb2 are nested attachments: {limbID, attachPoint}
             const cJSON* l1 = cJSON_GetObjectItemCaseSensitive(joint, "limb1");
             const cJSON* l2 = cJSON_GetObjectItemCaseSensitive(joint, "limb2");
@@ -361,6 +398,7 @@ static void load_toy_file(const char* path, const char* container) {
         const cJSON* rj;
         cJSON_ArrayForEach(rj, rjs) {
             td_rotjoint* r = &d->rotjoints[ri++];
+            r->sid = dupstr(rj, "id");
             char* n1 = dupstr(rj, "limbID1");
             char* n2 = dupstr(rj, "limbID2");
             r->limb1 = limb_index(d, n1);
