@@ -23,6 +23,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE MinSizeRel)
 endif()
 
+# the original game uses x87 PC=53, we need to emulate that faithfully, ditching FMA
+add_compile_options(-ffp-contract=off)
+
 set(SOKOL_DIR "${CMAKE_SOURCE_DIR}/vendor/sokol")
 set(CJSON_DIR "${CMAKE_SOURCE_DIR}/vendor/cjson")
 set(MINIAUDIO_DIR "${CMAKE_SOURCE_DIR}/vendor/miniaudio")
