@@ -1,6 +1,7 @@
 // Object model: sn_t plumbing, the Ruby Vector bridge, allocators, and the
 // SoupNode / SoupNodeCollection / Toy / RCore method surface.
 #include "physics.h"
+#include "sprite_frame.h"
 #include <stdlib.h>
 #include "rubyhost_internal.h"
 
@@ -311,6 +312,42 @@ static VALUE coll_by_sid(VALUE self, VALUE sid) {
     return Qnil;
 }
 
+// Sprite
+
+// frame is stored state unless bound to a limb with a multi-frame sequence,
+// then it is sprite_frame_for_orientation of the body's angle and the store
+// is ignored
+
+static int sprite_body(const sn_t* n) {
+    // sprite -> its limb's SpriteContainer -> the limb
+    if (NIL_P(n->parent) || !sn_p(n->parent)) return -1;
+    const VALUE owner = sn_get(n->parent)->parent;
+    if (NIL_P(owner) || !sn_p(owner)) return -1;
+    return sn_get(owner)->body;
+}
+
+static VALUE sprite_frame_count(VALUE self) {
+    const sn_t* n = sn_get(self);
+    return INT2NUM(n->spdef ? n->spdef->num_frames : 0);
+}
+
+static VALUE sprite_frame(VALUE self) {
+    const sn_t* n = sn_get(self);
+    const int nframes = n->spdef ? n->spdef->num_frames : 0;
+    const int body = sprite_body(n);
+    if (nframes > 1 && body >= 0) {
+        return INT2NUM(sprite_frame_for_orientation(
+            phys_body_orientation(body), nframes));
+    }
+    return INT2NUM(n->frame);
+}
+
+// A write to a bound rotation sprite cannot stick: the renderer recomputes it.
+static VALUE sprite_frame_set(VALUE self, VALUE v) {
+    sn_get(self)->frame = NUM2INT(v);
+    return v;
+}
+
 // Toy
 
 static VALUE toy_coll(VALUE self, int i) { return sn_get(self)->colls[i]; }
@@ -385,6 +422,11 @@ void rbh_register_nodes(void) {
     rb_define_method(c, "count", coll_count, 0);
     rb_define_method(c, "by_index", coll_by_index, 1);
     rb_define_method(c, "by_sid", coll_by_sid, 1);
+
+    c = cls_find("Sprite");
+    rb_define_method(c, "frame", sprite_frame, 0);
+    rb_define_method(c, "frame=", sprite_frame_set, 1);
+    rb_define_method(c, "frame_count", sprite_frame_count, 0);
 
     c = cls_find("Toy");
     rb_define_method(c, "toys", toy_toys, 0);

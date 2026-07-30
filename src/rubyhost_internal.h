@@ -34,6 +34,7 @@ typedef struct {
     const td_shape* shdef;  // shape node
     const td_sound* snddef; // sound node
     int shape_index;        // index in the owning limb/physics body
+    int frame;              // sprite: last frame= (rotation sprites derive it)
     const td_joint* jdef;   // joint node
     int body;               // SN_LIMB: phys body index, -1 = not realized
     double px, py, orient, shock;

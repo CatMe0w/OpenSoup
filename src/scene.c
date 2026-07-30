@@ -1,5 +1,6 @@
 #include "scene.h"
 #include "physics.h"
+#include "sprite_frame.h"
 #include "sokol_log.h"
 #include <limits.h>
 #include <math.h>
@@ -510,16 +511,9 @@ void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
         if (s->body >= 0) { // grabbed sprites follow too: the spring moves them
             body_to_sprite(s, view_h);
             if (s->nframes > 1) {
-                // FLC frames are pre-rendered ROTATION phases (GDI can't rotate
-                // bitmaps): frame = f(orientation), not a timed animation.
-                //
-                // alpha principal-axis moments: frames step 2pi/N per index in
-                // the visually-CCW direction, frame 0 = theta 0 - same sign
-                // as the physics angle.
-                const float turns = phys_body_orientation(s->body) / (2.0f * 3.14159265f);
-                const float wrapped = turns - (float)(int)turns; // frac, sign kept
-                int f = (int)((wrapped < 0 ? wrapped + 1.0f : wrapped) * (float)s->nframes);
-                s->frame = (f >= s->nframes) ? 0 : f;
+                // rotation sequence, not a timed animation (sprite_frame.h)
+                s->frame = sprite_frame_for_orientation(
+                    phys_body_orientation(s->body), s->nframes);
             }
         } else if (s->animate && s->nframes > 1) { // unbound: timed animation
             s->acc_ms += dt_ms;
