@@ -224,3 +224,42 @@ if(APPLE)
     set(CPACK_DMG_DISABLE_APPLICATIONS_SYMLINK OFF)
     include(CPack)
 endif()
+
+# headless Ruby script runner: runs an acceptance scenario against OpenSoup
+add_executable(opensoup_rubyscript
+    src/rubyscript_main.c
+    src/assets.c
+    src/rubyhost.c
+    src/rubyhost_engine.c
+    src/rubyhost_limb.c
+    src/rubyhost_node.c
+    src/rubyhost_realize.c
+    src/rubyhost_sound.c
+    src/toybox_button.c
+    src/toybox_scroll.c
+    src/physics.c
+    src/toyfile.c
+    src/toyfile_playset.c
+    src/toyfile_fs.c
+    src/toydefs.c
+    src/audio.c
+    vendor/cjson/cJSON.c
+)
+target_include_directories(opensoup_rubyscript PRIVATE
+    "${CJSON_DIR}" "${MINIAUDIO_DIR}" "${STB_DIR}" src)
+target_link_libraries(opensoup_rubyscript PRIVATE Ruby186::Embed)
+target_compile_options(opensoup_rubyscript PRIVATE -Wall -Wextra)
+
+if(APPLE)
+    target_link_libraries(opensoup_rubyscript PRIVATE
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+    )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Threads REQUIRED)
+    target_link_libraries(opensoup_rubyscript PRIVATE
+        Threads::Threads
+        "${CMAKE_DL_LIBS}"
+        m
+    )
+endif()
