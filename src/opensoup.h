@@ -41,4 +41,7 @@ void opensoup_mouse_up(float x_px, float y_px);
 // precise=false: delta_y is in wheel detents; precise=true: logical points.
 void opensoup_scroll(float x_px, float y_px, float delta_y, bool precise);
 
+// Request a diagnostic dump. Deferred: runs in the next frame.
+void opensoup_diagnostics_request(void);
+
 void opensoup_shutdown(void);

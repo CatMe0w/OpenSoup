@@ -261,6 +261,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam,
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
             running = false;
+        } else if (wparam == VK_F9) {
+            opensoup_diagnostics_request();
         }
         return 0;
     case WM_CLOSE:

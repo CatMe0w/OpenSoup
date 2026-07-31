@@ -33,12 +33,17 @@ static void open_opensoup_folder(void) {
 
 @interface AppMenuActions : NSObject
 - (void)openOpenSoupFolder:(id)sender;
+- (void)saveDiagnosticDump:(id)sender;
 @end
 
 @implementation AppMenuActions
 - (void)openOpenSoupFolder:(id)sender {
     (void)sender;
     open_opensoup_folder();
+}
+- (void)saveDiagnosticDump:(id)sender {
+    (void)sender;
+    opensoup_diagnostics_request();
 }
 @end
 
@@ -140,6 +145,11 @@ static void setup_app_menu(void) {
                    action:@selector(openOpenSoupFolder:)
             keyEquivalent:@""];
     open_folder.target = app_menu_actions;
+    NSMenuItem* dump = [app_menu
+        addItemWithTitle:@"Save Diagnostic Dump"
+                   action:@selector(saveDiagnosticDump:)
+            keyEquivalent:@"d"];
+    dump.target = app_menu_actions;
     [app_menu addItem:[NSMenuItem separatorItem]];
     [app_menu addItemWithTitle:[@"Quit " stringByAppendingString:app_name]
                         action:@selector(terminate:)
@@ -195,6 +205,13 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
     opensoup_mouse_up(x, y);
+}
+- (void)keyDown:(NSEvent*)event {
+    if (event.keyCode == 101) { // F9
+        opensoup_diagnostics_request();
+        return;
+    }
+    [super keyDown:event];
 }
 - (void)scrollWheel:(NSEvent*)event {
     float x, y;

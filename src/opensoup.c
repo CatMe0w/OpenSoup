@@ -4,6 +4,7 @@
 #include "opensoup.h"
 #include "assets_layout.h"
 #include "audio.h"
+#include "physics.h"
 #include "rubyhost.h"
 #include "scene.h"
 #include "sprite_hook.h"
@@ -11,6 +12,9 @@
 #include "toydefs.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 static const char* g_assets_root;
 
@@ -122,6 +126,113 @@ void opensoup_scroll(float x_px, float y_px, float delta_y, bool precise) {
     }
 }
 
+// Diagnostic dump: scene, contacts and replay, deferred to the next step.
+#define DUMP_WAIT_FRAMES 300
+
+static FILE* dump_out;
+static int dump_wait;
+static bool dump_pending;
+
+static bool dump_directory(char* out, size_t cap) {
+    if (!g_assets_root) {
+        return false;
+    }
+    const char* slash = strrchr(g_assets_root, '/');
+    if (!slash) {
+        return false;
+    }
+    const int n = snprintf(out, cap, "%.*s/diagnostics",
+                           (int)(slash - g_assets_root), g_assets_root);
+    if (n < 0 || (size_t)n >= cap) {
+        return false;
+    }
+#if defined(__MINGW32__)
+    mkdir(out); // the Windows CRT takes no mode
+#else
+    mkdir(out, 0777);
+#endif
+    return true;
+}
+
+static FILE* dump_open(const char* stamp, const char* extension) {
+    char dir[1024], path[1152];
+    if (!dump_directory(dir, sizeof dir)) {
+        return NULL;
+    }
+    const int n = snprintf(path, sizeof path, "%s/dump-%s.%s", dir, stamp,
+                           extension);
+    if (n < 0 || (size_t)n >= sizeof path) {
+        return NULL;
+    }
+    FILE* f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "opensoup: cannot write %s\n", path);
+        return NULL;
+    }
+    printf("opensoup: diagnostic dump -> %s\n", path);
+    return f;
+}
+
+void opensoup_diagnostics_request(void) {
+    dump_pending = true;
+}
+
+// Replay first: it captures pre-step state.
+static void dump_begin(void) {
+    dump_pending = false;
+    if (dump_out) {
+        return; // one still waiting for a step
+    }
+    char stamp[40];
+    const time_t now = time(NULL);
+    struct tm parts;
+#if defined(_WIN32) || defined(__MINGW32__)
+    parts = *localtime(&now);
+#else
+    localtime_r(&now, &parts);
+#endif
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &parts);
+    // Two presses inside one second must not overwrite each other.
+    static char previous[40];
+    static int repeat;
+    repeat = strcmp(stamp, previous) == 0 ? repeat + 1 : 0;
+    snprintf(previous, sizeof previous, "%s", stamp);
+    if (repeat) {
+        snprintf(stamp + strlen(stamp), sizeof stamp - strlen(stamp), "-%d",
+                 repeat);
+    }
+
+    FILE* replay = dump_open(stamp, "rb");
+    if (replay) {
+        rbh_dump_replay(replay);
+        fclose(replay);
+    }
+    dump_out = dump_open(stamp, "txt");
+    if (!dump_out) {
+        return;
+    }
+    rbh_dump_scene(dump_out);
+    phys_debug_dump(dump_out);
+    phys_debug_capture_begin(dump_out);
+    dump_wait = DUMP_WAIT_FRAMES;
+}
+
+static void dump_settle(void) {
+    if (!dump_out) {
+        return;
+    }
+    if (phys_debug_capture_armed() && --dump_wait > 0) {
+        return; // no step ran in this frame; the arm stays up
+    }
+    if (phys_debug_capture_armed()) {
+        fprintf(dump_out, "\nno step ran within %d frames "
+                          "(engine paused or stopped)\n", DUMP_WAIT_FRAMES);
+        phys_debug_capture_end();
+    }
+    fclose(dump_out);
+    dump_out = NULL;
+}
+
 opensoup_frame_result opensoup_frame(double dt_ms, float cursor_x,
                                      float cursor_y, bool cursor_valid) {
     opensoup_frame_result r = { .wants_mouse = true, .quit = false };
@@ -135,7 +246,11 @@ opensoup_frame_result opensoup_frame(double dt_ms, float cursor_x,
                          || scene_hit_test(cursor_x, cursor_y);
         }
     }
+    if (dump_pending) {
+        dump_begin();
+    }
     rbh_frame(dt_ms); // Ruby heartbeat: run_steps + dispatch_timers
+    dump_settle();
     toybox_frame(dt_ms);
     r.quit = toybox_quit_requested();
     return r;

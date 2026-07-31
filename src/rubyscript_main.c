@@ -3,6 +3,7 @@
 #include "rubyhost.h"
 #include "assets_layout.h"
 #include "audio.h"
+#include "physics.h"
 #include "toydefs.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,33 @@ int main(int argc, char** argv) {
 
     const bool ok = rbh_eval(text, argc == 3 ? argv[2] : "stdin");
     free(text);
+
+    // OPENSOUP_DUMP=<prefix>: write scene + replay dumps.
+    const char* dump = getenv("OPENSOUP_DUMP");
+    if (dump) {
+        char path[1024];
+        // Replay first: it captures pre-step state.
+        snprintf(path, sizeof path, "%s.rb", dump);
+        FILE* f = fopen(path, "w");
+        if (f) {
+            rbh_dump_replay(f);
+            fclose(f);
+        } else {
+            perror(path);
+        }
+        snprintf(path, sizeof path, "%s.txt", dump);
+        f = fopen(path, "w");
+        if (f) {
+            rbh_dump_scene(f);
+            phys_debug_dump(f);
+            phys_debug_capture_begin(f);
+            rbh_eval("$default_engine.run_steps(1)", "dump step");
+            phys_debug_capture_end();
+            fclose(f);
+        } else {
+            perror(path);
+        }
+    }
 
     fflush(stdout);
     rbh_shutdown();

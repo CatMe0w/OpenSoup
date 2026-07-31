@@ -64,6 +64,7 @@ if(APPLE)
         src/toydefs.c
         src/audio.c
         src/rubyhost.c
+        src/rubyhost_dump.c
         src/rubyhost_engine.c
         src/rubyhost_limb.c
         src/rubyhost_node.c
@@ -130,6 +131,7 @@ elseif(WIN32 AND MINGW)
         src/toydefs.c
         src/audio.c
         src/rubyhost.c
+        src/rubyhost_dump.c
         src/rubyhost_engine.c
         src/rubyhost_limb.c
         src/rubyhost_node.c
@@ -170,6 +172,7 @@ add_executable(opensoup_rubyboot
     src/rubyboot_main.c
     src/assets.c
     src/rubyhost.c
+    src/rubyhost_dump.c
     src/rubyhost_engine.c
     src/rubyhost_limb.c
     src/rubyhost_node.c
@@ -230,6 +233,7 @@ add_executable(opensoup_rubyscript
     src/rubyscript_main.c
     src/assets.c
     src/rubyhost.c
+    src/rubyhost_dump.c
     src/rubyhost_engine.c
     src/rubyhost_limb.c
     src/rubyhost_node.c
