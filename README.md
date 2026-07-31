@@ -22,7 +22,7 @@ Extract the w64devkit somewhere, and add its `bin` folder to your `PATH` environ
 
 Run the following commands:
 
-```
+```bash
 cmake -B build
 cmake --build build
 ```
@@ -33,7 +33,7 @@ Find the built executable in `build/opensoup.exe`.
 
 CMake is required. 
 
-```
+```bash
 cmake -B build
 cmake --build build
 ```
@@ -41,6 +41,18 @@ cmake --build build
 Find the built executable in `build/OpenSoup.app` (macOS) or `build/opensoup` (Linux).
 
 > Linux support is work in progress. _Wayland bad bad_
+
+## Lockstep
+
+We proudly present Lockstep (patent pending), a tool to ensure OpenSoup is bit-for-bit identical to the original Souptoys.
+
+See [tools/lockstep/README.md](tools/lockstep/README.md) for more information.
+
+To verify if your build behaves the perfect same as the original Souptoys, run:
+
+```bash
+uv run tools/lockstep/main.py
+```
 
 ## License
 

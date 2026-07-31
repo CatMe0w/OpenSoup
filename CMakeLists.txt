@@ -259,6 +259,12 @@ if(APPLE)
         "-framework AudioToolbox"
         "-framework CoreAudio"
     )
+elseif(WIN32 AND MINGW)
+    target_link_libraries(opensoup_rubyscript PRIVATE ole32) # miniaudio's COM
+    target_link_options(opensoup_rubyscript PRIVATE
+        -static-libgcc
+        -Wl,--stack,8388608
+    )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(Threads REQUIRED)
     target_link_libraries(opensoup_rubyscript PRIVATE
