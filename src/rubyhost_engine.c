@@ -237,8 +237,9 @@ static VALUE eng_input_grab(VALUE self, VALUE limb, VALUE input, VALUE pos) {
             }
         }
         in->ref1 = limb;
-        phys_grab(ln->body, c * dx + sn * dy, -sn * dx + c * dy,
-                  move, rotate);
+        // phys_grab takes the clicked world point and picks its own anchor
+        // convention, since it is what undoes it.
+        phys_grab(ln->body, (float)px, (float)py, move, rotate);
     }
     return Qnil;
 }

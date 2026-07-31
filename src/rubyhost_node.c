@@ -48,6 +48,7 @@ static VALUE sn_wrap(VALUE klass, int kind) {
     n->audio_sample = -1;
     n->license_policy = n->load_paths = Qnil;
     n->body = -1;
+    n->joint = -1;
     n->shape_index = -1;
     for (int i = 0; i < SN_NCOLLS; i++) {
         n->colls[i] = Qnil;

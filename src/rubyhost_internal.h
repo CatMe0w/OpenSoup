@@ -37,7 +37,9 @@ typedef struct {
     int frame;              // sprite: last frame= (rotation sprites derive it)
     const td_joint* jdef;   // joint node
     int body;               // SN_LIMB: phys body index, -1 = not realized
-    double px, py, orient, shock;
+    int joint;              // Joint: phys joint slot, -1 = not realized
+    double px, py, orient;
+    int shock;              // SN_LIMB: Limb#shock_order (Integer, not Float)
     double mx, my, mL;      // SN_LIMB: momentum, pre-realization only
     double lscale;          // SN_LIMB: owning toy's base_scale (unit conv)
     VALUE inputs;           // SN_ENGINE

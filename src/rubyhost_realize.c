@@ -125,12 +125,16 @@ static int body_for_limb(const td_limb* l, float x, float y, float theta,
     }
     phys_params prm = {
         .mass = l->mass,
-        .inertia = l->inertia * scale * scale, // def inertia is toy-local units^2
+        // Toy-local units^2. Keep both multiplies in one double expression;
+        // rounding twice shifts inertia by an ULP and walks the orientation.
+        .inertia = (float)((double)l->inertia * scale * scale),
         .gravity = l->has_gravity_override ? l->gravity_override : PHYS_GRAVITY,
         .mouse_stiffness = l->mouse_stiffness,
         .mouse_dampener = l->mouse_dampener,
         .air_linear = l->air_resistance_linear,
         .air_angular = l->air_resistance_angular,
+        .centre_of_resistance = { l->centre_of_resistance[0] * scale,
+                                  l->centre_of_resistance[1] * scale },
         .anchored = l->fixed_move,
         .fixed_rotate = l->fixed_rotate,
         .motor_force = { l->motor_force[0], l->motor_force[1] },
@@ -168,9 +172,26 @@ static bool toy_realize(VALUE toyv) {
                         t->def->class_name, ln->ldef->name);
                 return false;
             }
+            // Scripts assign shock_order before the body exists.
+            phys_body_set_shock_order(ln->body, ln->shock);
             if (ln->body >= 0 && (ln->mx || ln->my || ln->mL)) {
                 phys_body_set_momentum(ln->body, (float)ln->mx, (float)ln->my,
                                        (float)ln->mL);
+            }
+            // Magnet attach points and radius are toy-local.
+            for (int m = 0; m < ln->ldef->nmagnets; m++) {
+                const td_magnet* d = &ln->ldef->magnets[m];
+                const phys_magnet pm = {
+                    .group = hash_group(d->group),
+                    .attach = { d->attach[0] * S, d->attach[1] * S },
+                    .bidirectional = d->bidirectional,
+                    .inverted = d->inverted,
+                    .spring_response = d->spring_response,
+                    .stiffness = d->stiffness,
+                    .dampener = d->dampener,
+                    .radius = d->radius * S,
+                };
+                phys_magnet_add(ln->body, d->producer, &pm);
             }
         }
     }
@@ -187,10 +208,11 @@ static bool toy_realize(VALUE toyv) {
         if (b1 < 0 || b2 < 0) {
             continue;
         }
-        if (phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
-                           b2, j->anchor2[0] * S, j->anchor2[1] * S,
-                           j->rest_length * S, j->stiffness,
-                           j->dampener) < 0) {
+        jn->joint = phys_joint_add(b1, j->anchor1[0] * S, j->anchor1[1] * S,
+                                   b2, j->anchor2[0] * S, j->anchor2[1] * S,
+                                   j->rest_length * S, j->stiffness,
+                                   j->dampener);
+        if (jn->joint < 0) {
             fprintf(stderr, "rubyhost: cannot allocate joint for %s\n",
                     t->def->class_name);
             return false;
