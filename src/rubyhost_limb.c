@@ -53,12 +53,17 @@ static VALUE limb_orientation_set(VALUE self, VALUE v) {
     return v;
 }
 
+// An Integer, not a Float, and it reaches the broadphase: negative bodies are
+// left out of shock ordering. Scripts set it after realization.
 static VALUE limb_shock_order(VALUE self) {
-    return rb_float_new(sn_get(self)->shock);
+    sn_t* n = sn_get(self);
+    return INT2NUM(n->body >= 0 ? phys_body_shock_order(n->body) : n->shock);
 }
 
 static VALUE limb_shock_order_set(VALUE self, VALUE v) {
-    sn_get(self)->shock = NUM2DBL(v);
+    sn_t* n = sn_get(self);
+    n->shock = NUM2INT(v);
+    if (n->body >= 0) phys_body_set_shock_order(n->body, n->shock);
     return v;
 }
 
@@ -76,23 +81,41 @@ static void limb_pose(sn_t* n, double* x, double* y, double* th) {
     }
 }
 
-static VALUE limb_to_world(VALUE self, VALUE v) {
+// Keep script coordinates on the engine's float grid: narrow the argument to
+// float, transform through the body's own 3x3, and round the result. to_local
+// must use the inverse matrix: the determinant and reciprocal it is built from
+// leave visible rounding. Unrealized limbs have no body and fall back to the
+// same arithmetic written out.
+static VALUE limb_xform(VALUE self, VALUE v, int inverse) {
     sn_t* n = sn_get(self);
-    double x, y, th, lx, ly;
+    double px, py;
+    vec_get(v, &px, &py);
+    const float lx = (float)px, ly = (float)py;
+
+    if (n->body >= 0) {
+        float m[9];
+        phys_body_transform(n->body, inverse ? NULL : m, inverse ? m : NULL);
+        return vec_new((float)((double)lx * m[0] + (double)ly * m[1] + m[2]),
+                       (float)((double)lx * m[3] + (double)ly * m[4] + m[5]));
+    }
+
+    double x, y, th;
     limb_pose(n, &x, &y, &th);
-    vec_get(v, &lx, &ly);
-    const double c = cos(th), sn = sin(th);
-    return vec_new(x + c * lx - sn * ly, y + sn * lx + c * ly);
+    const float c = (float)cos(th), sn = (float)sin(th);
+    if (!inverse) {
+        return vec_new((float)(x + c * lx - sn * ly),
+                       (float)(y + sn * lx + c * ly));
+    }
+    const double dx = lx - x, dy = ly - y;
+    return vec_new((float)(c * dx + sn * dy), (float)(-sn * dx + c * dy));
+}
+
+static VALUE limb_to_world(VALUE self, VALUE v) {
+    return limb_xform(self, v, 0);
 }
 
 static VALUE limb_to_local(VALUE self, VALUE v) {
-    sn_t* n = sn_get(self);
-    double x, y, th, wx, wy;
-    limb_pose(n, &x, &y, &th);
-    vec_get(v, &wx, &wy);
-    const double c = cos(th), sn = sin(th);
-    const double dx = wx - x, dy = wy - y;
-    return vec_new(c * dx + sn * dy, -sn * dx + c * dy);
+    return limb_xform(self, v, 1);
 }
 
 static VALUE limb_momentum(VALUE self) {
@@ -142,8 +165,15 @@ static VALUE limb_inertia_tensor(VALUE self) {
     if (!n->ldef) {
         return Qnil;
     }
-    // def inertia is toy-local units^2; scripts expect world units
-    return rb_float_new(n->ldef->inertia * n->lscale * n->lscale);
+    // Def inertia is toy-local units^2; scripts expect world units. Report the
+    // float the body runs on, not a double recomputation of it.
+    if (n->body >= 0) {
+        phys_params p;
+        phys_body_get_params(n->body, &p);
+        return rb_float_new(p.inertia);
+    }
+    return rb_float_new((float)((double)n->ldef->inertia
+                                * n->lscale * n->lscale));
 }
 
 static VALUE limb_mass(VALUE self) {
@@ -156,12 +186,169 @@ static VALUE limb_fixed_move(VALUE self) {
     return (n->ldef && n->ldef->fixed_move) ? Qtrue : Qfalse;
 }
 
+// Live per-limb physics parameters, named as the original's Limb exposes them.
+// Each pair reads phys_params, sets one field and writes it back.
+#define LIMB_PARAM(name, field)                                          \
+    static VALUE limb_##name(VALUE self) {                               \
+        sn_t* n = sn_get(self);                                          \
+        if (n->body < 0) return Qnil;                                    \
+        phys_params p;                                                   \
+        phys_body_get_params(n->body, &p);                               \
+        return rb_float_new(p.field);                                    \
+    }                                                                    \
+    static VALUE limb_##name##_set(VALUE self, VALUE v) {                \
+        sn_t* n = sn_get(self);                                          \
+        if (n->body < 0) return v;                                       \
+        phys_params p;                                                   \
+        phys_body_get_params(n->body, &p);                               \
+        p.field = (float)NUM2DBL(v);                                     \
+        phys_body_set_params(n->body, &p);                               \
+        return v;                                                        \
+    }
+
+LIMB_PARAM(mouse_stiffness, mouse_stiffness)
+LIMB_PARAM(mouse_dampener, mouse_dampener)
+LIMB_PARAM(air_linear, air_linear)
+LIMB_PARAM(air_angular, air_angular)
+LIMB_PARAM(gravity, gravity)
+LIMB_PARAM(mat_velocity_response, material[0])
+LIMB_PARAM(mat_stiffness, material[1])
+LIMB_PARAM(mat_dampener, material[2])
+LIMB_PARAM(mat_kinetic_friction, material[3])
+LIMB_PARAM(mat_static_friction, material[4])
+#undef LIMB_PARAM
+
+// A Vector, so it does not fit LIMB_PARAM.
+// Never nil: Limb#dup calls .dup on whatever this returns.
+static VALUE limb_centre_of_resistance(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (n->body < 0) return vec_new(0.0f, 0.0f);
+    phys_params p;
+    phys_body_get_params(n->body, &p);
+    return vec_new(p.centre_of_resistance[0], p.centre_of_resistance[1]);
+}
+
+static VALUE limb_centre_of_resistance_set(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    if (n->body < 0 || NIL_P(v)) return v;
+    phys_params p;
+    phys_body_get_params(n->body, &p);
+    double x, y;
+    vec_get(v, &x, &y);
+    p.centre_of_resistance[0] = (float)x;
+    p.centre_of_resistance[1] = (float)y;
+    phys_body_set_params(n->body, &p);
+    return v;
+}
+
+// Joint
+
+// Live joint parameters, named as the original's Joint class exposes them.
+
+#define JOINT_PARAM(name, field, wrap, unwrap)                           \
+    static VALUE joint_##name(VALUE self) {                              \
+        sn_t* n = sn_get(self);                                          \
+        if (n->joint < 0) return Qnil;                                   \
+        phys_joint_params p;                                             \
+        phys_joint_get_params(n->joint, &p);                             \
+        return wrap(p.field);                                            \
+    }                                                                    \
+    static VALUE joint_##name##_set(VALUE self, VALUE v) {               \
+        sn_t* n = sn_get(self);                                          \
+        if (n->joint < 0) return v;                                      \
+        phys_joint_params p;                                             \
+        phys_joint_get_params(n->joint, &p);                             \
+        p.field = unwrap(v);                                             \
+        phys_joint_set_params(n->joint, &p);                             \
+        return v;                                                        \
+    }
+
+#define AS_FLOAT(v) ((float)NUM2DBL(v))
+#define AS_BOOL(v) (RTEST(v))
+#define WRAP_BOOL(b) ((b) ? Qtrue : Qfalse)
+
+JOINT_PARAM(stiffness, stiffness, rb_float_new, AS_FLOAT)
+JOINT_PARAM(dampener, dampener, rb_float_new, AS_FLOAT)
+JOINT_PARAM(rest_length, rest_length, rb_float_new, AS_FLOAT)
+JOINT_PARAM(move1, move1, WRAP_BOOL, AS_BOOL)
+JOINT_PARAM(move2, move2, WRAP_BOOL, AS_BOOL)
+JOINT_PARAM(rotate1, rotate1, WRAP_BOOL, AS_BOOL)
+JOINT_PARAM(rotate2, rotate2, WRAP_BOOL, AS_BOOL)
+JOINT_PARAM(axis_on, axis_on, WRAP_BOOL, AS_BOOL)
+#undef JOINT_PARAM
+
+static VALUE joint_axis(VALUE self) {
+    sn_t* n = sn_get(self);
+    if (n->joint < 0) return Qnil;
+    phys_joint_params p;
+    phys_joint_get_params(n->joint, &p);
+    return vec_new(p.axis[0], p.axis[1]);
+}
+
+static VALUE joint_axis_set(VALUE self, VALUE v) {
+    sn_t* n = sn_get(self);
+    if (n->joint < 0) return v;
+    phys_joint_params p;
+    phys_joint_get_params(n->joint, &p);
+    double x, y;
+    vec_get(v, &x, &y);
+    p.axis[0] = (float)x;
+    p.axis[1] = (float)y;
+    phys_joint_set_params(n->joint, &p);
+    return v;
+}
+
+// Anchors, each in its own limb's local frame and in the meters Limb#to_world
+// takes: scripts write `j.limb1.to_world(j.point1)`. Never nil.
+#define JOINT_POINT(name, field)                                              \
+    static VALUE joint_##name(VALUE self) {                                   \
+        sn_t* n = sn_get(self);                                               \
+        if (n->joint < 0) return vec_new(0.0f, 0.0f);                         \
+        phys_joint_params p;                                                  \
+        phys_joint_get_params(n->joint, &p);                                  \
+        return vec_new(p.field[0], p.field[1]);                               \
+    }                                                                         \
+    static VALUE joint_##name##_set(VALUE self, VALUE v) {                    \
+        sn_t* n = sn_get(self);                                               \
+        if (n->joint < 0) return v;                                           \
+        phys_joint_params p;                                                  \
+        phys_joint_get_params(n->joint, &p);                                  \
+        double x, y;                                                          \
+        vec_get(v, &x, &y);                                                   \
+        p.field[0] = (float)x;                                                \
+        p.field[1] = (float)y;                                                \
+        phys_joint_set_params(n->joint, &p);                                  \
+        return v;                                                             \
+    }
+JOINT_POINT(point1, point1)
+JOINT_POINT(point2, point2)
+#undef JOINT_POINT
+
+static VALUE joint_limb1(VALUE self) { return sn_get(self)->ref1; }
+static VALUE joint_limb2(VALUE self) { return sn_get(self)->ref2; }
+
 // Shape
 
 // the limb a shape belongs to (shape.parent = ShapeContainer, .parent = limb)
 static VALUE shape_limb(VALUE self) {
     VALUE coll = sn_get(self)->parent;
     return NIL_P(coll) ? Qnil : sn_get(coll)->parent;
+}
+
+// The core's body-local swept vertices as [[Vector, radius], ...].
+static VALUE shape_vertices(VALUE self) {
+    VALUE result = rb_ary_new();
+    sn_t* shape = sn_get(self);
+    VALUE limb = shape_limb(self);
+    if (NIL_P(limb) || shape->shape_index < 0) return result;
+    float xyr[3 * PHYS_MAX_SHAPE_VERTS];
+    const int n = phys_shape_vertices(sn_get(limb)->body, shape->shape_index,
+                                      xyr, PHYS_MAX_SHAPE_VERTS);
+    for (int i = 0; i < n; i++) {
+        rb_ary_push(result, rb_ary_new3(2, vec_new(xyr[3 * i], xyr[3 * i + 1]),
+                                        rb_float_new(xyr[3 * i + 2])));
+    }
+    return result;
 }
 
 static bool value_array_has(VALUE ary, VALUE value) {
@@ -360,6 +547,43 @@ void rbh_register_limb(void) {
     rb_define_method(c, "angular_momentum", limb_angular_momentum, 0);
     rb_define_method(c, "angular_momentum=", limb_angular_momentum_set, 1);
     rb_define_method(c, "inertia_tensor", limb_inertia_tensor, 0);
+#define LIMB_ACCESSOR(rname, cname)                                  \
+    rb_define_method(c, rname, limb_##cname, 0);                     \
+    rb_define_method(c, rname "=", limb_##cname##_set, 1)
+    LIMB_ACCESSOR("mouse_stiffness_override", mouse_stiffness);
+    LIMB_ACCESSOR("mouse_dampener_override", mouse_dampener);
+    LIMB_ACCESSOR("centre_of_resistance", centre_of_resistance);
+    LIMB_ACCESSOR("air_resistance_linear", air_linear);
+    LIMB_ACCESSOR("air_resistance_angular", air_angular);
+    LIMB_ACCESSOR("gravity_override", gravity);
+    LIMB_ACCESSOR("material_velocity_response", mat_velocity_response);
+    LIMB_ACCESSOR("material_stiffness", mat_stiffness);
+    LIMB_ACCESSOR("material_dampener", mat_dampener);
+    LIMB_ACCESSOR("material_kinetic_friction", mat_kinetic_friction);
+    LIMB_ACCESSOR("material_static_friction", mat_static_friction);
+#undef LIMB_ACCESSOR
+
+    c = cls_find("Joint");
+    rb_define_method(c, "limb1", joint_limb1, 0);
+    rb_define_method(c, "limb2", joint_limb2, 0);
+    rb_define_method(c, "axis", joint_axis, 0);
+    rb_define_method(c, "axis=", joint_axis_set, 1);
+    rb_define_method(c, "point1", joint_point1, 0);
+    rb_define_method(c, "point1=", joint_point1_set, 1);
+    rb_define_method(c, "point2", joint_point2, 0);
+    rb_define_method(c, "point2=", joint_point2_set, 1);
+#define JOINT_ACCESSOR(rname, cname)                                 \
+    rb_define_method(c, rname, joint_##cname, 0);                    \
+    rb_define_method(c, rname "=", joint_##cname##_set, 1)
+    JOINT_ACCESSOR("stiffness", stiffness);
+    JOINT_ACCESSOR("dampener", dampener);
+    JOINT_ACCESSOR("rest_length", rest_length);
+    JOINT_ACCESSOR("move1", move1);
+    JOINT_ACCESSOR("move2", move2);
+    JOINT_ACCESSOR("rotate1", rotate1);
+    JOINT_ACCESSOR("rotate2", rotate2);
+    JOINT_ACCESSOR("axis_on", axis_on);
+#undef JOINT_ACCESSOR
 
     c = cls_find("Shape");
     rb_define_method(c, "member_of", shape_member_of, 0);
@@ -367,5 +591,6 @@ void rbh_register_limb(void) {
     rb_define_method(c, "trigger_on", shape_trigger_on, 0);
     rb_define_method(c, "trigger_on=", shape_trigger_on_set, 1);
     rb_define_method(c, "triggers_overlapping", shape_triggers_overlapping, 1);
+    rb_define_method(c, "vertices", shape_vertices, 0);
     rb_define_method(c, "limb", shape_limb, 0);
 }

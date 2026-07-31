@@ -183,6 +183,7 @@ static VALUE alloc_toy(VALUE klass) {
             sn_t* jn = sn_get(jv);
             jn->jdef = j;
             jn->parent = n->colls[2];
+            if (j->sid && j->sid[0]) jn->sid = ID2SYM(rb_intern(j->sid));
             if (j->limb1 >= 0) {
                 jn->ref1 = rb_ary_entry(limbs->items, j->limb1);
             }
