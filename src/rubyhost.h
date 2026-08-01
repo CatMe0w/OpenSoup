@@ -24,6 +24,12 @@ bool rbh_spawn_toy(const char* class_name, const char* class_dir,
 // View pixels (y-down) -> scene metres (y-up).
 bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m);
 
+// The inverse mapping, in the renderer's terms: view px of the scene's
+// bottom-left corner, and logical px per scene unit. Both change whenever the
+// framework refits the scene, so the renderer must re-read them per frame.
+bool rbh_view_transform(double* origin_x_px, double* origin_y_px,
+                        double* px_per_unit);
+
 // Resolve a toy class without instantiating (preload for cross-references).
 bool rbh_load_toy_class(const char* class_name, const char* class_dir);
 
@@ -55,6 +61,9 @@ bool rbh_recycle_sprite(int sprite);
 
 // Clear: restore scene defaults and remove every non-sticky toy.
 bool rbh_clear_scene(void);
+
+// Load an original .playset: replaces the non-sticky toys and the world.
+bool rbh_open_playset(const char* path);
 
 // Report the view size in logical pixels; triggers wall recalculation.
 void rbh_screen_size(double w_px, double h_px);

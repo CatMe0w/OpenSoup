@@ -107,6 +107,7 @@ static struct {
     toybox_button_model button_models[SH_COUNT];
     int button_pressed;
     bool quit_requested;
+    toybox_command pending_command;
     bool moving;
     bool scrolling;
     float move_dx, move_dy;
@@ -324,9 +325,13 @@ static bool activate_button(int slot, bool desired_on) {
                 fprintf(stderr, "toybox: mute failed\n");
                 return false;
             }
+        case SH_PLAY:
+            tb.pending_command = TOYBOX_COMMAND_OPEN_PLAYSET;
+            return true;
+        case SH_REWIND:
+            tb.pending_command = TOYBOX_COMMAND_RESTART_PLAYSET;
+            return true;
         default:
-            // Keep the command identity honest until playset I/O, Background,
-            // F10 help, and platform URL opening have their real backends.
             if (tb.button_models[slot].toggle) {
                 printf("toybox: command %s.%s is not implemented yet\n",
                        button_command(slot), desired_on ? "on" : "off");
@@ -391,8 +396,7 @@ static void update_content_height(void) {
 static void layout_content(void) {
     const tb_rect clip = {tb.panel.x + 3.0f, tb.panel.y + 3.0f,
                           tb.panel.w - 24.0f, tb.panel.h - 6.0f};
-    // The original scrollbar lives in the wood channel immediately to the
-    // right of the blue catalog, not inside the catalog's clipping rect.
+    // Scrollbar sits in the wood channel to the right of the catalog.
     const tb_rect scroll_clip = {tb.panel.x + tb.panel.w,
                                  tb.panel.y + 3.0f,
                                  20.0f, tb.panel.h - 6.0f};
@@ -451,9 +455,7 @@ static void layout_content(void) {
         const float ratio = tb.content_h > 0.0f
                           ? fminf(1.0f, tb.panel.h / tb.content_h) : 1.0f;
         const float cap_h = (float)(scroll_top->h + scroll_bottom->h);
-        // ScrollbarGUIComponent scales only the flexible middle span; the two
-        // arrow caps retain their full height. This is longer than simply
-        // multiplying the whole thumb by the visible/content ratio.
+        // Caps keep full height; only the middle span scales.
         const float flexible_h = fmaxf(0.0f, scroll_clip.h - cap_h);
         const float middle_h = fmaxf(1.0f, flexible_h * ratio);
         const float thumb_h = cap_h + middle_h;
@@ -708,10 +710,8 @@ bool toybox_init(const char* assets_root, float view_w, float view_h) {
     }
 
     for (int i = 0; i < toydefs_icon_count() && tb.nicons < TB_MAX_ICONS; i++) {
-        // Fidelity TODO: the lightweight grid deliberately bypasses
-        // IconToy#add_icon/IconGridStackItem. It therefore does not yet apply
-        // license enable/alpha state, globalToyInstanceLimit, leftovers, or
-        // script-provided icon rewrites; see rbh_catalog_finalize().
+        // TODO: bypasses IconToy#add_icon, so license state,
+        // globalToyInstanceLimit, and icon rewrites are not applied.
         const toyicon_t* def = toydefs_icon_at(i);
         const toydef_t* toy = toydefs_find(def->class_name);
         const int pack = pack_for_id(rbh_toy_pack(def->class_name));
@@ -805,8 +805,7 @@ bool toybox_mouse_down(float x, float y) {
         refresh_button(button);
         return true;
     }
-    // Until OpenSoup has a persistent Dock/menu-bar reopening affordance,
-    // consume the visible minimise button without making the Toybox vanish.
+    // Consume minimise without hiding; no reopening affordance exists yet.
     if (inside(tb.buttons[SH_MIN], x, y)) {
         set_hover(-1);
         return true;
@@ -885,11 +884,7 @@ void toybox_scroll(float delta_y, bool precise) {
     if (!tb.ready || tb.max_scroll <= 0.0f) {
         return;
     }
-    // Win32's handler changes the normalized model by
-    // wheel_delta * IconToy#scroll_increment / WHEEL_DELTA.  A non-precise
-    // Cocoa wheel delta is one detent; the Ruby increment is one 0.8m/80px
-    // icon row. AppKit supplies precise trackpad deltas (including momentum
-    // events) directly in logical points.
+    // Non-precise delta = detents, scaled to one icon row; precise = points.
     const float delta = precise ? delta_y : delta_y * TB_CELL_H;
     const float target = fminf(fmaxf(tb.scroll.target - delta, 0.0f),
                                tb.max_scroll);
@@ -926,6 +921,12 @@ void toybox_frame(double dt_ms) {
 
 bool toybox_quit_requested(void) {
     return tb.ready && tb.quit_requested;
+}
+
+toybox_command toybox_take_command(void) {
+    const toybox_command command = tb.pending_command;
+    tb.pending_command = TOYBOX_COMMAND_NONE;
+    return command;
 }
 
 bool toybox_capturing(void) {

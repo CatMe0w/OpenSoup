@@ -21,13 +21,10 @@
 #define O_NOFOLLOW 0 // the Windows CRT has no symbolic link to refuse
 #endif
 
-// Sibling of the assets root that an install is built up in. Named so that a
-// leftover is obviously not an assets tree, to any reader and to the code.
+// Install staging directory; an incomplete install is never mistaken for assets.
 #define STAGING_SUFFIX ".incomplete"
 
-// Length of an absolute path's root prefix: 1 for "/", 3 for "C:/", and 0
-// when the path is not absolute. Paths only ever reach OpenSoup with '/'
-// separators, so a backslash root is deliberately not recognised.
+// Root prefix length: 1 for "/", 3 for "C:/", 0 if not absolute.
 static size_t root_prefix(const char* path) {
     if (!path) {
         return 0;
@@ -101,8 +98,7 @@ static bool make_directory_tree(const char* path, fs_context* fs) {
         fs_error(fs, "out of memory creating %s", path);
         return false;
     }
-    // The root itself ("/", "C:/") is never a directory anyone can create,
-    // and on Windows "C:" is not even a path stat() understands.
+    // Skip the root prefix; it already exists and cannot be mkdir'd.
     const size_t root = root_prefix(path);
     for (char* p = copy + (root ? root : 1); *p; p++) {
         if (*p != '/') {
@@ -569,6 +565,44 @@ toyfile_status toyfile_extract_container(const toyfile* file,
     return status;
 }
 
+toyfile_status toyfile_install_playsets(const toyfile_input* playsets,
+                                        size_t count, const char* directory,
+                                        char* error, size_t error_size) {
+    fs_context fs = {error, error_size};
+    if (fs.error && fs.error_size) {
+        error[0] = 0;
+    }
+    if ((!playsets && count) || !directory || root_prefix(directory) == 0) {
+        fs_error(&fs, "missing playsets or absolute playset directory");
+        return TOYFILE_INVALID_ARGUMENT;
+    }
+    if (count == 0) {
+        return TOYFILE_OK;
+    }
+    if (!make_directory_tree(directory, &fs)) {
+        return TOYFILE_IO_ERROR;
+    }
+
+    toyfile_status status = TOYFILE_OK;
+    for (size_t i = 0; status == TOYFILE_OK && i < count; i++) {
+        const char* name = playsets[i].name;
+        if (!name || !safe_resource_name(name, strlen(name))) {
+            fs_error(&fs, "unsafe playset filename %s", name ? name : "(none)");
+            status = TOYFILE_INVALID_ARGUMENT;
+            break;
+        }
+        char* path = child_path(directory, playsets[i].name, &fs);
+        if (!path) {
+            status = TOYFILE_OUT_OF_MEMORY;
+        } else if (!write_resource(path, playsets[i].data, playsets[i].size,
+                                   &fs)) {
+            status = TOYFILE_IO_ERROR;
+        }
+        free(path);
+    }
+    return status;
+}
+
 toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
                                            size_t count,
                                            const char* assets_root,
@@ -634,10 +668,8 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
         memcpy(parent, target, parent_size);
         parent[parent_size] = 0;
     }
-    // Everything lands in a sibling staging directory and is renamed into
-    // place only once the whole install has succeeded, so a failure can never
-    // leave a half-populated assets root behind. Debris keeps the staging
-    // name, which app_assets_get_state() does not recognise as assets.
+    // Atomic install: build in staging, rename on success. A failed staging
+    // dir is not recognised as assets.
     char* staging = NULL;
     if (status == TOYFILE_OK) {
         staging = malloc(target_size + sizeof STAGING_SUFFIX);
@@ -679,8 +711,7 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
     }
 
     if (status == TOYFILE_OK) {
-        // rename() needs the destination gone. The caller has already
-        // established that the assets root is absent or empty.
+        // rename() requires the destination gone; caller guarantees this.
         if (rmdir(target) != 0 && errno != ENOENT) {
             fs_error(&fs, "cannot clear the assets root %s: %s", target,
                      strerror(errno));

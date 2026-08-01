@@ -1,14 +1,11 @@
-// OpenSoup macOS host: transparent desktop scene with per-pixel
-// click-through, rendering via sokol_gfx (Metal). No sokol_app: window
-// management is our own, since click-through overlays are the whole point.
-//
-// Application policy lives in opensoup.c; this file translates AppKit
-// events and applies the app's click-through/quit decisions to the window.
+// macOS host: transparent overlay with per-pixel click-through (Metal).
+// Policy lives in opensoup.c; this file translates AppKit events.
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 
 #include "app_assets.h"
+#include "host_dialog.h"
 #include "opensoup.h"
 #include "scene.h"
 
@@ -105,6 +102,40 @@ static bool show_installer_picker(void) {
     return false;
 }
 
+static bool run_open_panel(const char* title, const char* directory,
+                           const char* kind, const char* extension,
+                           char* out, size_t out_size, void* user) {
+    (void)user;
+    @autoreleasepool {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.title = [NSString stringWithUTF8String:title];
+        panel.message = [NSString stringWithFormat:@"%s files (*.%s)",
+                                                   kind, extension];
+        panel.prompt = @"Open";
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = NO;
+        panel.allowsMultipleSelection = NO;
+        if (directory) {
+            panel.directoryURL = [NSURL fileURLWithPath:
+                [NSString stringWithUTF8String:directory] isDirectory:YES];
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        panel.allowedFileTypes = @[[NSString stringWithUTF8String:extension]];
+#pragma clang diagnostic pop
+
+        if ([panel runModal] != NSModalResponseOK) {
+            return false;
+        }
+        const char* path = panel.URL.fileSystemRepresentation;
+        if (!path || strlen(path) >= out_size) {
+            return false;
+        }
+        snprintf(out, out_size, "%s", path);
+        return true;
+    }
+}
+
 static NSRect visible_scene_frame(void) {
     NSScreen* screen = window.screen ?: NSScreen.mainScreen;
     return screen.visibleFrame;
@@ -158,9 +189,7 @@ static void setup_app_menu(void) {
     NSApp.mainMenu = main_menu;
 }
 
-// Window coordinates -> OpenSoup view coordinates. OverlayView is flipped,
-// so convertPoint supplies logical pixels/points with a top-left origin and
-// y-down. Backing pixels never enter input, Ruby, Toybox, or hit-testing.
+// Window -> logical px (flipped view: top-left origin, y-down).
 static void to_view_point(NSPoint window_point, float* x, float* y) {
     const NSPoint p = [view convertPoint:window_point fromView:nil];
     *x = (float)p.x;
@@ -216,9 +245,7 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
 - (void)scrollWheel:(NSEvent*)event {
     float x, y;
     to_view_point([event locationInWindow], &x, &y);
-    // AppKit reports precise scrolling deltas in points, which are already
-    // OpenSoup's logical view units. Non-precise deltas remain detents.
-    // Trackpad momentum is supplied by the normal scroll event stream.
+    // Precise deltas are already in logical points; non-precise = detents.
     opensoup_scroll(x, y, (float)event.scrollingDeltaY,
                     event.hasPreciseScrollingDeltas);
 }
@@ -312,8 +339,7 @@ static void to_view_point(NSPoint window_point, float* x, float* y) {
     };
     scene_setup(&env);
 
-    // World extents and original 1x assets use logical pixels. drawableSize
-    // is backing pixels and only belongs to the Metal swapchain.
+    // World and assets use logical pixels; drawableSize is backing pixels.
     const NSSize logical_size = view.bounds.size;
     opensoup_start(logical_size.width, logical_size.height);
 
@@ -371,6 +397,7 @@ int main(void) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         setup_app_menu();
+        host_dialog_set_open_file(run_open_panel, NULL);
         OverlayAppDelegate* delegate = [[OverlayAppDelegate alloc] init];
         [NSApp setDelegate:delegate];
         [NSApp run];

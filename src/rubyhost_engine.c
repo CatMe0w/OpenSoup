@@ -47,9 +47,7 @@ static VALUE eng_scene_bl(VALUE self) {
     return vec_new(n->scene_bl[0], n->scene_bl[1]);
 }
 
-// All rect/scale setters are change-gated, like the original's: firing the
-// framework callbacks on a no-op write would run fit_* on half-updated
-// rects (scale blows up to Infinity) and can recurse.
+// Change-gated: a no-op write must not fire callbacks (Infinity blowup).
 static VALUE eng_scene_bl_set(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
     double x, y;
@@ -129,10 +127,8 @@ static VALUE eng_screen_br(VALUE self) {
     return vec_new(g_screen_w, g_screen_h);
 }
 
-// Coordinate spaces: view/screen = logical px y-down; canvas = logical px
-// y-down with origin at the canvas rect's top-left; scene = meters y-up,
-// scene_top_right stored NEGATED (framework convention). scale = logical px
-// per scene unit. Backing pixels are never visible to Ruby.
+// view = logical px y-down; canvas = view-relative; scene = meters y-up,
+// scene_top_right NEGATED (framework convention). scale = px per scene unit.
 static VALUE eng_view_to_canvas(VALUE self, VALUE v) {
     sn_t* n = sn_get(self);
     double x, y;
@@ -173,11 +169,8 @@ static VALUE eng_scene_to_view(VALUE self, VALUE v) {
     return eng_canvas_to_view(self, eng_scene_to_canvas(self, v));
 }
 
-// Input grab triplet - the mouse spring, anchored at the grabbed point
-// (sub_4237B0): the limb's default_grab_move/rotate flags gate the spring's
-// linear/torque components. A containing `grab` shape overrides both flags;
-// the original walks every shape in definition order, so the last matching
-// handle wins when handles overlap.
+// Input grab: limb's default_grab_move/rotate gate the spring. A `grab`
+// shape overrides; last matching handle wins.
 static int shape_contains(const td_shape* sh, double x, double y) {
     if (!sh || sh->npoints < 1) {
         return 0;
@@ -347,10 +340,8 @@ static VALUE eng_run_steps(VALUE self, VALUE n) {
     return Qnil;
 }
 
-// Physics timers: proc fires every `period` ticks (1/100 s), first at
-// `start` ticks from now; proc.call receives the SCHEDULED tick so the
-// framework's `t % n` patterns hold even when a frame delivers several
-// ticks at once.
+// Physics timers: proc fires every `period` ticks (1/100 s). proc.call
+// receives the scheduled tick (not wall time).
 static VALUE eng_add_phys_timer(VALUE self, VALUE proc, VALUE period,
                                 VALUE start) {
     sn_t* e = sn_get(self);
@@ -401,6 +392,30 @@ void rbh_screen_size(double w_px, double h_px) {
         fcall_protected(core, "screen_size_changed", 0, Qnil, Qnil, Qnil,
                         "screen_size_changed");
     }
+}
+
+// Scene -> view mapping. Must agree with eng_scene_to_view exactly, or
+// grabs anchor where the toy is not.
+bool rbh_view_transform(double* origin_x_px, double* origin_y_px,
+                        double* px_per_unit) {
+    const VALUE eng = rb_gv_get("$default_engine");
+    if (!sn_p(eng)) {
+        return false;
+    }
+    const sn_t* n = sn_get(eng);
+    if (n->scale <= 0.0) {
+        return false;
+    }
+    if (origin_x_px) {
+        *origin_x_px = n->canvas_tl[0] - n->scene_bl[0] * n->scale;
+    }
+    if (origin_y_px) {
+        *origin_y_px = n->canvas_br[1] + n->scene_bl[1] * n->scale;
+    }
+    if (px_per_unit) {
+        *px_per_unit = n->scale;
+    }
+    return true;
 }
 
 bool rbh_view_to_scene(double x_px, double y_px, double* x_m, double* y_m) {

@@ -42,9 +42,7 @@ static char* append_path(const char* base, const char* relative) {
 }
 
 #if defined(__APPLE__)
-// NSApplicationSupportDirectory resolves to exactly this for an unsandboxed
-// process, and a sandbox would rewrite HOME to the container anyway - so this
-// stays free of Foundation, and of Objective-C.
+// Avoids Foundation; sandboxed HOME already points to the container.
 const char* app_assets_path(void) {
     static char* assets_path;
     if (assets_path) {
@@ -91,8 +89,7 @@ const char* app_assets_path(void) {
     if (!local_app_data || !local_app_data[0]) {
         return NULL;
     }
-    // %LOCALAPPDATA% arrives with backslashes. Every path OpenSoup handles is
-    // split on '/' alone, so normalize once, here.
+    // Normalize backslashes to '/'.
     char* base = strdup(local_app_data);
     if (!base) {
         return NULL;
@@ -113,6 +110,30 @@ const char* app_assets_path(void) {
     return assets_path;
 }
 #endif
+
+bool app_assets_sibling_path(const char* assets_root, const char* name,
+                             char* out, size_t out_size) {
+    if (!assets_root || !name || !out || out_size == 0) {
+        return false;
+    }
+    size_t length = strlen(assets_root);
+    while (length > 1 && assets_root[length - 1] == '/') {
+        length--;
+    }
+    size_t parent = length;
+    while (parent > 0 && assets_root[parent - 1] != '/') {
+        parent--;
+    }
+    if (parent == 0) {
+        return false; // a relative root has nothing to sit beside
+    }
+    parent--; // the separator itself
+    // A root one level down ("/assets") leaves the filesystem root as parent
+    const int n = parent
+        ? snprintf(out, out_size, "%.*s/%s", (int)parent, assets_root, name)
+        : snprintf(out, out_size, "/%s", name);
+    return n > 0 && (size_t)n < out_size;
+}
 
 typedef enum {
     DIRECTORY_UNREADABLE = -1,
@@ -148,7 +169,7 @@ app_assets_state app_assets_get_state(const char* assets_root) {
     return APP_ASSETS_READY;
 }
 
-static bool install_assets_from_decoded_toys(
+static bool install_assets_from_decoded_containers(
         void* context, const nsis_container* containers, size_t count,
         char* error, size_t error_size) {
     const char* root = context;
@@ -172,30 +193,58 @@ static bool install_assets_from_decoded_toys(
         return false;
     }
 
+    char playsets[2048];
+    if (!app_assets_sibling_path(root, APP_ASSETS_PLAYSETS,
+                                 playsets, sizeof playsets)) {
+        if (error && error_size) {
+            snprintf(error, error_size,
+                     "cannot place the playsets directory beside %s", root);
+        }
+        return false;
+    }
+
+    // One allocation, .toy containers first and .playset files after them,
+    // since the two groups install separately.
     toyfile_input* inputs = calloc(count ? count : 1, sizeof(*inputs));
     if (!inputs) {
         if (error && error_size) {
             snprintf(error, error_size,
-                     "out of memory indexing decoded .toy files");
+                     "out of memory indexing decoded containers");
         }
         return false;
     }
+    size_t toy_count = 0;
+    size_t playset_count = 0;
     for (size_t i = 0; i < count; i++) {
-        if (containers[i].type != NSIS_CONTAINER_TOY) {
+        if (containers[i].type != NSIS_CONTAINER_TOY
+            && containers[i].type != NSIS_CONTAINER_PLAYSET) {
             if (error && error_size) {
                 snprintf(error, error_size,
-                         "installer returned a non-.toy container");
+                         "installer returned an unknown container type");
             }
             free(inputs);
             return false;
         }
-        inputs[i] = (toyfile_input){
-            containers[i].name, containers[i].data, containers[i].size,
-        };
+        if (containers[i].type == NSIS_CONTAINER_TOY) {
+            inputs[toy_count++] = (toyfile_input){
+                containers[i].name, containers[i].data, containers[i].size,
+            };
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (containers[i].type == NSIS_CONTAINER_PLAYSET) {
+            inputs[toy_count + playset_count++] = (toyfile_input){
+                containers[i].name, containers[i].data, containers[i].size,
+            };
+        }
     }
 
-    const toyfile_status status = toyfile_install_into_assets(
-        inputs, count, root, error, error_size);
+    toyfile_status status = toyfile_install_playsets(
+        inputs + toy_count, playset_count, playsets, error, error_size);
+    if (status == TOYFILE_OK) {
+        status = toyfile_install_into_assets(inputs, toy_count, root,
+                                             error, error_size);
+    }
     free(inputs);
     return status == TOYFILE_OK;
 }
@@ -215,8 +264,8 @@ bool app_assets_install_from_installer(
     }
 
     const bool ok = nsis_decode_containers(
-        installer_path, NSIS_CONTAINER_TOY,
-        install_assets_from_decoded_toys, (void*)assets_root,
+        installer_path, NSIS_CONTAINER_TOY | NSIS_CONTAINER_PLAYSET,
+        install_assets_from_decoded_containers, (void*)assets_root,
         error, error_size);
     if (!ok && error && error_size && !error[0]) {
         snprintf(error, error_size,

@@ -24,3 +24,11 @@ bool toybox_quit_requested(void);
 
 bool toybox_capturing(void);
 int toybox_catalog_count(void);
+
+typedef enum {
+    TOYBOX_COMMAND_NONE,
+    TOYBOX_COMMAND_OPEN_PLAYSET,    // "open": pick a .playset and load it
+    TOYBOX_COMMAND_RESTART_PLAYSET, // "restartPlayset": reload the last one
+} toybox_command;
+
+toybox_command toybox_take_command(void);

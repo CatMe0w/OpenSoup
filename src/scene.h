@@ -13,6 +13,11 @@ void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
                  double dt_ms);
 void scene_shutdown(void);
 
+// Scene's bottom-left in logical px, plus scale. Framework updates this on
+// wall changes; defaults to PHYS_PX_PER_UNIT from the view's bottom-left.
+void scene_set_view_transform(float origin_x_px, float origin_y_px,
+                              float px_per_unit);
+
 // Group-id namespace. Groups are only ever compared for equality, but toy
 // instance ids grow without bound, so the partition is by sign:
 //   >= 1  toy sprites, group = the toy's instance id
@@ -27,21 +32,14 @@ void scene_shutdown(void);
 #define SCENE_LAYER_UI 100
 #define SCENE_LAYER_UI_DRAG 110
 
-// Register a sprite; returns a STABLE sprite id (draw order may be
-// reordered internally, ids never change). frames are premultiplied RGBA8
-// (top-left origin); the scene keeps the pointers borrowed for alpha
-// hit-testing - caller must keep them alive. speed_ms only matters when
-// nframes > 1. group: sprites of one toy share a group; raising any of
-// them raises the whole group (intra-group order = insertion order, i.e.
-// zOrder if the caller adds sprites back-to-front).
+// Returns a stable sprite id. Frames are premultiplied RGBA8 (top-left
+// origin), borrowed for alpha hit-testing (keep alive). Group sprites are
+// raised together; intra-group order = insertion order.
 int scene_sprite_add(int w, int h, int nframes, uint8_t* const* frames,
                      int speed_ms, float x_px, float y_px, int group);
 
-// Attach a sprite to a physics body. (anchor_x, anchor_y) is the vector
-// from the body origin to the sprite's visual centre (objectCentreOfMass
-// from the toy definition), pixels, y-up. The FLC rotation frames are
-// pre-rendered about the canvas centre, and the centre is a material point
-// of the limb, so the offset rotates with the body's orientation.
+// Bind to a physics body. Anchor = body origin to visual centre (pixels,
+// y-up); rotates with body orientation.
 void scene_sprite_bind_body(int sprite, int body, float anchor_x, float anchor_y);
 
 // Lightweight unbound-sprite controls used by the Toybox UI.  They only

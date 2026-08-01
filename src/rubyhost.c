@@ -1,12 +1,5 @@
-// Embedded Ruby 1.8.6 host, the script side of the engine.
-// Class surface comes from the reverse-engineered Toybox binding surface:
-// every method is first bound to a logging stub so framework load-time aliases
-// (`alias :internal_render :render` etc.) always resolve; the subset the boot
-// path needs is then rebound to real implementations backed by toydefs/physics.
-//
-// The implementations live in the rubyhost_*.c files (node model, realization,
-// engine, limb/shape, sound); this file owns the class registry, the stub API
-// surface, the Souptoys resource host, and boot.
+// Embedded Ruby 1.8.6 host: class registry, stub surface, resource host,
+// and boot. Methods start as stubs; needed ones are rebound in rubyhost_*.c.
 #include "rubyhost.h"
 #include "assets_layout.h"
 #include "physics.h"
@@ -16,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "rubyhost_internal.h"
 
 void Init_ext(void); // ext/extinit.o: static stringio + syck
@@ -410,8 +404,7 @@ bool rbh_eval(const char* code, const char* what) {
     return false;
 }
 
-// rb_funcall behind rb_protect: script exceptions (e.g. inside timer procs)
-// must not longjmp through the C frame loop.
+// rb_funcall behind rb_protect: exceptions must not longjmp through C frames.
 struct fcall {
     VALUE recv;
     ID id;
@@ -436,9 +429,17 @@ bool fcall_protected(VALUE recv, const char* name, int argc,
     return false;
 }
 
-// Per-frame heartbeat: fixed 0.01s steps with an accumulator (clamped like
-// the native loop was), driven through the FRAMEWORK's run_steps wrapper so
-// engine_execute and pre-timer observers behave as in the original.
+// Per-frame heartbeat: fixed 0.01s steps with an accumulator, driven through
+// the framework's run_steps. Catch-up is capped by both step count and wall
+// clock: overrun scene time is dropped, so a heavy scene runs slow instead
+// of freezing.
+#define PHYS_CATCHUP_BUDGET_MS 8.0
+#define PHYS_CATCHUP_MAX_STEPS 25
+
+static double ms_since(clock_t start) {
+    return (double)(clock() - start) * 1000.0 / (double)CLOCKS_PER_SEC;
+}
+
 void rbh_frame(double dt_ms) {
     static double acc_ms;
     acc_ms += dt_ms;
@@ -447,17 +448,30 @@ void rbh_frame(double dt_ms) {
         return;
     }
     acc_ms -= steps * (PHYS_DT * 1000.0);
-    if (steps > 25) {
-        steps = 25; // clamp long stalls
+    if (steps > PHYS_CATCHUP_MAX_STEPS) {
+        steps = PHYS_CATCHUP_MAX_STEPS; // clamp long stalls
     }
     VALUE eng = rb_gv_get("$default_engine");
     if (NIL_P(eng)) {
         return;
     }
-    fcall_protected(eng, "run_steps", 1, INT2FIX(steps), Qnil, Qnil,
-                    "run_steps");
-    fcall_protected(eng, "dispatch_timers", 1, INT2FIX(steps), Qnil, Qnil,
-                    "dispatch_timers");
+    const clock_t start = clock();
+    int done = 0;
+    while (done < steps) {
+        if (!fcall_protected(eng, "run_steps", 1, INT2FIX(1), Qnil, Qnil,
+                             "run_steps")) {
+            break;
+        }
+        done++;
+        if (ms_since(start) >= PHYS_CATCHUP_BUDGET_MS) {
+            break;
+        }
+    }
+    // Timers see steps that actually ran, not the frame delta.
+    if (done > 0) {
+        fcall_protected(eng, "dispatch_timers", 1, INT2FIX(done), Qnil, Qnil,
+                        "dispatch_timers");
+    }
 }
 
 static bool eval_resource(const char* key) {
@@ -482,9 +496,7 @@ static bool eval_resource(const char* key) {
     return ran;
 }
 
-// The exact bootstrap snippet Toybox.exe evals to pull souptoys.rb out of the
-// resource container (the proto version of the require hook the framework
-// then installs for everything else).
+// Bootstrap: load souptoys.rb from the resource container.
 static const char* BOOTSTRAP =
     "path = 'souptoys.rb';"
     "begin;"
@@ -516,9 +528,8 @@ bool rbh_boot(const char* assets_root) {
 
     ruby_init();
     ruby_script("souptoys_embedded");
-    // Ruby 1.8 traps INT/TERM and turns them into SignalExceptions, which
-    // our rb_protect frames would swallow, and the app becomes unkillable.
-    // The host owns process lifetime, not the interpreter.
+    // Ruby 1.8 traps INT/TERM as SignalExceptions; restore SIG_DFL so the
+    // app stays killable.
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
     Init_ext(); // static stringio + syck (yaml needs both)
@@ -562,16 +573,13 @@ bool rbh_boot(const char* assets_root) {
         return false;
     }
 
-    // Pack scripts guard on IconToy.instance. A headless instance retains
-    // their add_toypack calls in IconToy.toypacks without constructing the
-    // original physics-backed IconGrid UI.
+    // Headless IconToy retains add_toypack calls without constructing the UI.
     if (!rbh_eval("$opensoup_icon_toy = IconToy.new(nil, nil, nil)",
                   "IconToy catalog")) {
         return false;
     }
 
-    // toy classes for the defs we instantiate natively; just World for now
-    // (full toy import lands with the object-model bridge)
+    // Natively instantiated toy classes; just World for now.
     if (!rbh_eval("load 'world.rb'", "world.rb")) {
         return false;
     }
@@ -582,9 +590,8 @@ bool rbh_boot(const char* assets_root) {
     return true;
 }
 
-// Kernel#load only honours $LOAD_PATH (cleared at boot) for relative paths,
-// so toy-class dirs must reach Ruby as ABSOLUTE paths or the resolver
-// silently falls back to a script-less Toy subclass.
+// Toy-class dirs must be absolute; Kernel#load ignores relative paths not
+// on $LOAD_PATH, and we clear $LOAD_PATH at boot.
 static const char* abs_dir(const char* dir, char* buf) {
     if (!dir) {
         return ".";
@@ -593,8 +600,7 @@ static const char* abs_dir(const char* dir, char* buf) {
     if (!_fullpath(buf, dir, 1024)) {
         return dir;
     }
-    // _fullpath always answers in backslashes; every other path in OpenSoup,
-    // and Pathname's own string arithmetic, is '/'-separated.
+    // _fullpath returns backslashes; normalize to '/'.
     for (char* p = buf; *p; p++) {
         if (*p == '\\') {
             *p = '/';
@@ -606,8 +612,7 @@ static const char* abs_dir(const char* dir, char* buf) {
 #endif
 }
 
-// Bound as globals rather than interpolated into the eval'd source: a quote
-// anywhere in a path would end the Ruby literal early.
+// Bound as globals: a quote in a path would break an interpolated literal.
 static void bind_toy_class(const char* class_name, const char* class_dir) {
     char abs[1024];
     rb_gv_set("$opensoup_toy_class", rb_str_new2(class_name));
@@ -634,10 +639,8 @@ static int cmp_toypack(const void* a, const void* b) {
 }
 
 bool rbh_catalog_finalize(void) {
-    // Fidelity boundary: this snapshots add_toypack and the final property
-    // overrides only. A future IconGrid pass should also feed manifest icons
-    // through IconToy#add_icon so its seasonal path/open-limit rewrites and
-    // LicensePolicy decisions become observable by the native Toybox.
+    // Snapshots add_toypack only; a future pass should also run add_icon
+    // to honour LicensePolicy and seasonal rewrites.
     static const char* snapshot =
         "$opensoup_license_properties = $engine.get_license_properties;"
         "$opensoup_toypacks = IconToy.toypacks.map { |id, p|"
@@ -700,6 +703,19 @@ const char* rbh_toy_pack(const char* class_name) {
     VALUE value = rb_hash_aref(g_runtime_license_properties,
                                rb_str_new2(key));
     return TYPE(value) == T_STRING ? StringValueCStr(value) : NULL;
+}
+
+// Decode the playset natively; let the framework assemble it. Our IconToy
+// is headless, so the engine is addressed directly.
+bool rbh_open_playset(const char* path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    // Bound as a global; see bind_toy_class.
+    rb_gv_set("$opensoup_playset_path", rb_str_new2(path));
+    return rbh_eval("$default_engine.open_playset("
+                    "$engine.read_playset($opensoup_playset_path))\n",
+                    "open_playset");
 }
 
 bool rbh_spawn_toy(const char* class_name, const char* class_dir,

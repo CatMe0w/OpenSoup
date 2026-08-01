@@ -58,6 +58,10 @@ static struct {
     int sprite_cap;
     int next_id;
     texture_t* textures;
+    // px_per_unit <= 0 means the engine has not reported a mapping yet
+    struct {
+        float origin_x, origin_y, px_per_unit;
+    } view;
 } state;
 
 static bool grow_sprites(int wanted) {
@@ -157,20 +161,29 @@ static sprite_t* by_id(int id) {
     return NULL;
 }
 
-// world (meters, y-up, origin bottom-left) -> view (logical px, y-down)
-// FLC frames rotate about the CANVAS CENTRE (verified: rotated frames' art
-// bboxes stay symmetric about it); objectCentreOfMass is the vector from the
-// body origin to that visual centre, a material point of the limb - so the
-// offset ROTATES with the body's orientation.
-static void body_to_sprite(sprite_t* s, float view_h) {
+// World -> view mapping. The anchor (objectCentreOfMass) is the body origin
+// to visual centre vector and rotates with orientation. Art is authored at
+// PHYS_PX_PER_UNIT px/m; other scales zoom proportionally.
+static void body_to_sprite(sprite_t* s, float origin_x, float origin_y,
+                           float px_per_unit) {
     float wx, wy;
     phys_body_pos(s->body, &wx, &wy);
+    const float zoom = px_per_unit / PHYS_PX_PER_UNIT;
     const float th = phys_body_orientation(s->body);
     const float c = cosf(th), sn = sinf(th);
-    const float ox = c * s->ax - sn * s->ay; // px, y-up world sense
-    const float oy = sn * s->ax + c * s->ay;
-    s->x = wx * PHYS_PX_PER_UNIT + ox - (float)s->w / 2.0f;
-    s->y = view_h - wy * PHYS_PX_PER_UNIT - oy - (float)s->h / 2.0f;
+    const float ox = (c * s->ax - sn * s->ay) * zoom; // px, y-up world sense
+    const float oy = (sn * s->ax + c * s->ay) * zoom;
+    s->draw_w = (float)s->w * zoom;
+    s->draw_h = (float)s->h * zoom;
+    s->x = origin_x + wx * px_per_unit + ox - s->draw_w / 2.0f;
+    s->y = origin_y - wy * px_per_unit - oy - s->draw_h / 2.0f;
+}
+
+void scene_set_view_transform(float origin_x_px, float origin_y_px,
+                              float px_per_unit) {
+    state.view.origin_x = origin_x_px;
+    state.view.origin_y = origin_y_px;
+    state.view.px_per_unit = px_per_unit;
 }
 
 #if defined(SOKOL_D3D11)
@@ -504,12 +517,19 @@ void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
     if (view_w <= 0.0f || view_h <= 0.0f) {
         return;
     }
+    // Boot fallback: scene bottom-left at view bottom-left, native scale.
+    const bool reported = state.view.px_per_unit > 0.0f;
+    const float origin_x = reported ? state.view.origin_x : 0.0f;
+    const float origin_y = reported ? state.view.origin_y : view_h;
+    const float px_per_unit = reported ? state.view.px_per_unit
+                                       : PHYS_PX_PER_UNIT;
+
     // physics stepping and world extents now live in the Ruby heartbeat
     // (rbh_frame / rbh_screen_size); the scene only renders and hit-tests
     for (int i = 0; i < state.nsprites; i++) {
         sprite_t* s = &state.sprites[i];
         if (s->body >= 0) { // grabbed sprites follow too: the spring moves them
-            body_to_sprite(s, view_h);
+            body_to_sprite(s, origin_x, origin_y, px_per_unit);
             if (s->nframes > 1) {
                 // rotation sequence, not a timed animation (sprite_frame.h)
                 s->frame = sprite_frame_for_orientation(
@@ -540,7 +560,7 @@ void scene_frame(const sg_swapchain* swapchain, float view_w, float view_h,
                                   true);
         }
         const vs_params_t params = {
-            // original blit positions are integer pixels, trunc toward zero
+            // blit positions truncate to integer pixels
             // (Toybox.exe converts via fldcw 0xC00 fistp / __ftol2_sse)
             .pos = { (float)(int)s->x, (float)(int)s->y },
             .size = { s->draw_w, s->draw_h },
@@ -570,8 +590,7 @@ void scene_shutdown(void) {
     sg_shutdown();
 }
 
-// topmost sprite whose non-transparent pixel covers the point, or -1.
-// Matches the original layered window's per-pixel hit test (alpha > 0 hits).
+// topmost opaque pixel under the point, or -1.
 static int sprite_at(float x, float y) {
     for (int i = state.nsprites - 1; i >= 0; i--) {
         const sprite_t* s = &state.sprites[i];

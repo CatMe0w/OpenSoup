@@ -18,8 +18,15 @@ typedef enum {
 // are reported by the application while booting the game.
 app_assets_state app_assets_get_state(const char* assets_root);
 
-// Decodes the original installer and installs its .toy files into a missing or
-// empty assets root. On failure `error` always holds a human-readable reason.
+// Decodes the original installer, installs its .toy files into a missing or
+// empty assets root, and its .playset files into the playsets directory. On
+// failure `error` always holds a human-readable reason.
 bool app_assets_install_from_installer(
     const char* installer_path, const char* assets_root,
     char* error, size_t error_size);
+
+#define APP_ASSETS_PLAYSETS "playsets"
+
+// XXX: remove this. unify "assets" and "playsets" under a single "appdata" concept
+bool app_assets_sibling_path(const char* assets_root, const char* name,
+                             char* out, size_t out_size);

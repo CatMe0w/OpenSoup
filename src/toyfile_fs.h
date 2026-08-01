@@ -40,3 +40,9 @@ toyfile_status toyfile_install_into_assets(const toyfile_input* inputs,
                                            size_t count,
                                            const char* assets_root,
                                            char* error, size_t error_size);
+
+// Copies .playset files verbatim into `directory`. Existing files of the
+// same name are replaced.
+toyfile_status toyfile_install_playsets(const toyfile_input* playsets,
+                                        size_t count, const char* directory,
+                                        char* error, size_t error_size);

@@ -52,6 +52,7 @@ if(APPLE)
         src/opensoup.c
         src/scene.c
         src/assets.c
+        src/host_dialog.c
         src/sprite_hook.c
         src/toybox.c
         src/toybox_button.c
@@ -119,6 +120,7 @@ elseif(WIN32 AND MINGW)
         src/opensoup.c
         src/scene.c
         src/assets.c
+        src/host_dialog.c
         src/sprite_hook.c
         src/toybox.c
         src/toybox_button.c

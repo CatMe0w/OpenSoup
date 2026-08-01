@@ -15,6 +15,7 @@
 
 #include "app_assets.h"
 #include "composition.h"
+#include "host_dialog.h"
 #include "opensoup.h"
 #include "scene.h"
 
@@ -105,8 +106,7 @@ static bool show_installer_picker(const char* assets_root) {
         .nMaxFile = sizeof path,
         .lpstrTitle = "Select the original Souptoys installer (.exe) to set "
                       "up OpenSoup's game assets",
-        // OFN_NOCHANGEDIR: browsing would otherwise move the process's own
-        // working directory to wherever the user ended up
+        // OFN_NOCHANGEDIR: keep the process's working directory
         .Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
     };
     if (!GetOpenFileNameA(&picker)) {
@@ -120,6 +120,63 @@ static bool show_installer_picker(const char* assets_root) {
     }
     show_quit_alert("Game asset installation failed", error);
     return false;
+}
+
+// For the Toybox's open button
+static bool run_open_dialog(const char* title, const char* directory,
+                            const char* kind, const char* extension,
+                            char* out, size_t out_size, void* user) {
+    (void)user;
+    // A GetOpenFileName filter is a run of NUL-terminated pairs closed by a
+    // second NUL, so it cannot be built with plain string formatting.
+    char filter[128];
+    const int label = snprintf(filter, sizeof filter, "%s Files (*.%s)",
+                               kind, extension);
+    if (label < 0 || (size_t)label + 1 >= sizeof filter) {
+        return false;
+    }
+    const int pattern = snprintf(filter + label + 1,
+                                 sizeof filter - (size_t)label - 1,
+                                 "*.%s", extension);
+    if (pattern < 0 || (size_t)(label + 1 + pattern) + 2 > sizeof filter) {
+        return false;
+    }
+    filter[label + 1 + pattern + 1] = 0;
+
+    char native[MAX_PATH] = {0};
+    char start[MAX_PATH];
+    if (directory) {
+        snprintf(start, sizeof start, "%s", directory);
+        for (char* p = start; *p; p++) {
+            if (*p == '/') {
+                *p = '\\';
+            }
+        }
+    }
+    OPENFILENAMEA picker = {
+        .lStructSize = sizeof(OPENFILENAMEA),
+        .hwndOwner = window,
+        .lpstrFilter = filter,
+        .lpstrFile = native,
+        .nMaxFile = sizeof native,
+        .lpstrInitialDir = directory ? start : NULL,
+        .lpstrTitle = title,
+        .lpstrDefExt = extension,
+        .nFilterIndex = 1,
+        // OFN_NOCHANGEDIR: keep the process's working directory
+        .Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+    };
+    if (!GetOpenFileNameA(&picker) || strlen(native) >= out_size) {
+        return false;
+    }
+    // Everything downstream splits paths on '/' alone.
+    snprintf(out, out_size, "%s", native);
+    for (char* p = out; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return true;
 }
 
 // the scene speaks logical pixels; backing pixels belong to the swapchain
@@ -238,9 +295,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam,
         }
         return 0;
     case WM_CAPTURECHANGED:
-        // Capture can be taken away mid-drag, and the app has no cancel entry
-        // point, so release where the pointer last was or the Ruby-side grab
-        // never lets go.
+        // Capture taken mid-drag; synthesize a release or the grab sticks.
         if (dragging) {
             dragging = false;
             opensoup_mouse_up(to_logical(last_mouse.x),
@@ -306,9 +361,7 @@ static void create_window(void) {
     require_win32(RegisterClassExW(&window_class) != 0,
                   "cannot register the window class");
 
-    // WS_EX_LAYERED is what lets the toggled WS_EX_TRANSPARENT pass the mouse
-    // through: pass-through is a layered-window behaviour, and on a plain window
-    // WS_EX_TRANSPARENT only reorders painting.
+    // WS_EX_LAYERED is required for WS_EX_TRANSPARENT to pass mouse events.
     const RECT bounds = scene_bounds();
     window = CreateWindowExW(
         WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TRANSPARENT
@@ -491,6 +544,7 @@ int main(void) {
 
     create_window();
     create_graphics();
+    host_dialog_set_open_file(run_open_dialog, NULL);
 
     const sg_environment environment = {
         .defaults = {
@@ -505,8 +559,7 @@ int main(void) {
     };
     scene_setup(&environment);
 
-    // World extents and original 1x assets use logical pixels; the backbuffer
-    // size is physical and belongs to the swapchain alone.
+    // World and assets use logical pixels; backbuffer is physical.
     opensoup_start(logical_width(), logical_height());
     started = true;
 
